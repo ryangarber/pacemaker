@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path"
+	"runtime/debug"
 	"sort"
 	"strings"
 
@@ -16,8 +17,29 @@ import (
 	tu "github.com/ryangarber/pacemaker/internal/textutil"
 )
 
-// Version is set at build time via -ldflags.
+// Version is set at build time via -ldflags. Without it (`go install
+// github.com/ryangarber/pacemaker@v0.1.0`, `go build` in a checkout) it falls
+// back to the main module's version from the build info, and to "dev" when
+// that is unknown too.
 var Version = "dev"
+
+func init() { Version = resolveVersion(Version, debug.ReadBuildInfo) }
+
+// resolveVersion keeps a version stamped via -ldflags, else takes the main
+// module's version from the build info without its "v", so `go install`
+// prints the same as a release build ("0.1.0", or a pseudo-version such as
+// "0.1.1-0.20261125221700-cb028ad5e2f1"). "(devel)" counts as unknown.
+func resolveVersion(stamped string, read func() (*debug.BuildInfo, bool)) string {
+	if stamped != "dev" && stamped != "" {
+		return stamped
+	}
+	if info, ok := read(); ok && info != nil {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return strings.TrimPrefix(v, "v")
+		}
+	}
+	return "dev"
+}
 
 // ExitError carries a specific exit code without extra output.
 type ExitError struct{ Code int }
@@ -103,8 +125,17 @@ func (m *multi) Set(v string) error {
 	return nil
 }
 
-// parseInterspersed lets flags appear before or after positional args.
+// parseInterspersed lets flags appear before or after positional args. Every
+// argument after "--" is positional. The split is made before parsing because
+// flag.Parse swallows a leading "--" itself, leaving nothing to see.
 func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var tail []string
+	for i, a := range args {
+		if a == "--" {
+			args, tail = args[:i], args[i+1:]
+			break
+		}
+	}
 	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
@@ -112,10 +143,7 @@ func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
 		}
 		rest := fs.Args()
 		if len(rest) == 0 {
-			return pos, nil
-		}
-		if rest[0] == "--" {
-			return append(pos, rest[1:]...), nil
+			return append(pos, tail...), nil
 		}
 		pos = append(pos, rest[0])
 		args = rest[1:]
@@ -136,7 +164,10 @@ func Main(args []string, stdout, stderr *os.File) int {
 	color := g.Bool("color", false, "")
 	g.BoolVar(&c.NoFetch, "offline", false, "")
 	g.BoolVar(&c.Verbose, "v", false, "")
-	if err := g.Parse(args); err != nil {
+	if err := g.Parse(args); errors.Is(err, flag.ErrHelp) { // pacemaker -h / --help
+		printHelp(c, root, []string{"pacemaker"})
+		return 0
+	} else if err != nil {
 		fmt.Fprintln(stderr, "pacemaker:", err)
 		return 2
 	}

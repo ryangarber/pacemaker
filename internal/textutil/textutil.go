@@ -156,11 +156,9 @@ func Bar(p Painter, pct, waivedPct float64, w int) string {
 	if w <= 0 {
 		w = 20
 	}
-	full := int(pct/100*float64(w) + 0.5)
-	wv := int(waivedPct/100*float64(w) + 0.5)
-	if full+wv > w {
-		wv = w - full
-	}
+	clamp := func(n, hi int) int { return max(0, min(n, hi)) }
+	full := clamp(int(pct/100*float64(w)+0.5), w)
+	wv := clamp(int(waivedPct/100*float64(w)+0.5), w-full)
 	rest := w - full - wv
 	c := Red
 	switch {

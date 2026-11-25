@@ -128,6 +128,27 @@ func (p *parser) factoryBody(a span) int {
 	return -1
 }
 
+// unitRef recognises a registration argument at ts[i] that names a function
+// declared elsewhere instead of containing it: `X`, or the annotated form
+// ['$scope', 'dep', X]. It returns the index of the X token, or -1.
+func (p *parser) unitRef(i int) int {
+	if p.ts[i].Kind == Ident {
+		return i
+	}
+	m := p.match[i]
+	if !p.ts[i].Is("[") || m < 0 {
+		return -1
+	}
+	j := m - 1
+	if j > i && p.ts[j].Is(",") { // trailing comma
+		j--
+	}
+	if j > i && p.ts[j].Kind == Ident && (j == i+1 || p.ts[j-1].Is(",")) {
+		return j
+	}
+	return -1
+}
+
 func unquoteTok(s string) string { return strings.Trim(s, "'\"`") }
 
 // jsStatement handles top-level statements that declare symbols without a
@@ -219,8 +240,13 @@ func (p *parser) registrations(start, k, end int, prefix string) bool {
 		if p.d.WeakRegistrations[p.word(r.dot+1)] && !module && body < 0 {
 			continue
 		}
-		if name == "" || (body < 0 && !obj && fn.start == fn.end && p.ts[fn.start].Kind == Ident) {
-			continue // .controller('X', X): the function declaration is the unit
+		if name == "" {
+			continue
+		}
+		if ref := p.unitRef(fn.start); body < 0 && !obj && ref >= 0 && p.units[p.ts[ref].Text] != "" {
+			// .controller('X', X) or .controller('X', ['$scope', X]): the
+			// function declaration is the unit (see newParser).
+			continue
 		}
 		declStart, declEnd := r.dot, p.match[r.open]
 		if n == 0 {
@@ -335,10 +361,24 @@ func (p *parser) functionBody(idx, body int, qual, name, unitKind string) {
 func (p *parser) unitBody(lo, hi int, prefix string, full bool) {
 	var stmts []span
 	bodies := map[int]int{}
-	p.statements(lo, hi, false, func(start, end, body int) {
-		stmts = append(stmts, span{start, end})
-		bodies[start] = body
-	})
+	// Control-flow blocks share the unit's scope, so their statements are
+	// the unit's statements (`if (x) { vm.a = ... } else { ... }`). Function
+	// literals are not walked into: this and vm mean something else there.
+	var collect func(lo, hi int)
+	collect = func(lo, hi int) {
+		p.statements(lo, hi, false, func(start, end, body int) {
+			k := p.skipControl(start, end)
+			switch {
+			case k > end || p.ts[k].Is(";"):
+			case k == body:
+				collect(body+1, p.skipGroup(body, len(p.ts))-1)
+			default:
+				stmts = append(stmts, span{k, end})
+				bodies[k] = body
+			}
+		})
+	}
+	collect(lo, hi)
 	aliases := map[string]bool{"this": full}
 	inner := map[string]int{} // inner function name → decl index
 	declared := map[string]bool{}
@@ -434,6 +474,40 @@ func (p *parser) unitBody(lo, hi int, prefix string, full bool) {
 			p.decls[i].Exported = true
 		}
 	}
+}
+
+// skipControl returns the index past any control-flow headers and labels
+// opening the statement at ts[start:end]: `else if (x)`, `for (...)`, `try`,
+// `case 'a':`, `default:`, `outer:`. A block statement is left at its "{".
+func (p *parser) skipControl(start, end int) int {
+	k := start
+	for k <= end {
+		switch w := p.word(k); {
+		case (w == "if" || w == "for" || w == "while" || w == "with" || w == "switch" || w == "catch") &&
+			k+1 <= end && p.ts[k+1].Is("("):
+			k = p.skipGroup(k+1, end+1)
+		case w == "for" && k+2 <= end && p.word(k+1) == "await" && p.ts[k+2].Is("("):
+			k = p.skipGroup(k+2, end+1)
+		case w == "else" || w == "do" || w == "try" || w == "finally" || w == "catch": // catch {
+			k++
+		case w == "case":
+			k++
+			for q := 0; k <= end && (q > 0 || !p.ts[k].Is(":")); { // case a ? b : c:
+				if p.ts[k].Is("?") {
+					q++
+				} else if p.ts[k].Is(":") {
+					q--
+				}
+				k = p.skipGroup0(k, end+1)
+			}
+			k++
+		case w != "" && k+1 <= end && p.ts[k+1].Is(":"): // default: / label:
+			k += 2
+		default:
+			return k
+		}
+	}
+	return k
 }
 
 // innerFuncName returns the name of a `function name(...) {}` (or async)

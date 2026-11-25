@@ -33,6 +33,32 @@ func esc(s string) string {
 	return r.Replace(s)
 }
 
+// code renders s as an inline code span: newlines folded, fenced by more
+// backticks than any run inside s (padded when s starts or ends with one).
+// HTML needs no escaping inside a span. In a table cell (cell true) a pipe
+// is written \|, which GFM turns back into a pipe inside the span; elsewhere
+// it would show the backslash.
+func code(s string, cell bool) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if cell {
+		s = strings.ReplaceAll(s, "|", `\|`)
+	}
+	run, longest := 0, 0
+	for _, r := range s {
+		if r == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	fence := strings.Repeat("`", longest+1)
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		s = " " + s + " "
+	}
+	return fence + s + fence
+}
+
 func bar(pct float64) string {
 	n := int(pct/10 + 0.5)
 	return strings.Repeat("▰", n) + strings.Repeat("▱", 10-n)
@@ -76,7 +102,7 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 	p("## Targets\n\n| Target | Location | Revision | Line coverage | Symbols | Files |\n|---|---|---|---|---|---:|\n")
 	for _, t := range r.Targets {
 		if t.Error != "" {
-			p("| `%s` | %s | — | 🛑 %s | | |\n", t.Name, esc(t.Location), esc(t.Error))
+			p("| %s | %s | — | 🛑 %s | | |\n", code(t.Name, true), esc(t.Location), esc(t.Error))
 			continue
 		}
 		rev := textutil.ShortHash(t.Revision)
@@ -92,14 +118,14 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 		if cov.Files > 0 {
 			line = fmt.Sprintf("%s %.1f%%", bar(cov.Percent()), cov.Percent())
 		}
-		p("| `%s` | %s | `%s` | %s | %s | %d/%d |\n", t.Name, esc(t.Location), rev, line, sym, cov.FilesTouched, cov.Files)
+		p("| %s | %s | %s | %s | %s | %d/%d |\n", code(t.Name, true), esc(t.Location), code(rev, true), line, sym, cov.FilesTouched, cov.Files)
 	}
 	p("\n")
 
 	if len(r.Problems) > 0 {
 		p("## Marker problems\n\n")
 		for _, pr := range r.Problems {
-			p("- `%s:%d` — %s\n", pr.File, pr.Line, esc(pr.Message))
+			p("- %s — %s\n", code(fmt.Sprintf("%s:%d", pr.File, pr.Line), false), esc(pr.Message))
 		}
 		p("\n")
 	}
@@ -116,7 +142,7 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 			if n := l.OpenTodos(); n > 0 {
 				detail += fmt.Sprintf(" · ☐ %d todo(s)", n)
 			}
-			p("| %s | `%s` | `%s` | `%s` | %s |\n", emoji[l.Status], l.Block, esc(l.Ref), local, detail)
+			p("| %s | %s | %s | %s | %s |\n", emoji[l.Status], code(l.Block, true), code(l.Ref, true), code(local, true), detail)
 		}
 		p("\n")
 	}
@@ -131,9 +157,9 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 	if len(attn) > 0 {
 		p("## Details\n\n")
 		for _, l := range attn {
-			p("### %s `%s` → `%s`\n\n", emoji[l.Status], l.Block, l.Ref)
+			p("### %s %s → %s\n\n", emoji[l.Status], code(l.Block, false), code(l.Ref, false))
 			p("- **Status:** %s — %s\n", l.Status, esc(l.Detail))
-			p("- **Local:** `%s` lines %d–%d\n", l.LocalFile, l.LocalStart, l.LocalEnd)
+			p("- **Local:** %s lines %d–%d\n", code(l.LocalFile, false), l.LocalStart, l.LocalEnd)
 			if l.Baseline != nil {
 				p("- **Accepted:** `%s` %s at %s", textutil.ShortHash(l.Baseline.Revision), l.Baseline.Range, l.Baseline.AcceptedAt.Format("2006-01-02"))
 				if l.Baseline.AcceptedBy != "" {
@@ -142,22 +168,22 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 				p("\n")
 			}
 			if !l.Range.IsZero() {
-				p("- **Now:** `%s` `%s` %s\n", textutil.ShortHash(l.Revision), l.Current, l.Range)
+				p("- **Now:** %s %s %s\n", code(textutil.ShortHash(l.Revision), false), code(l.Current, false), l.Range)
 			}
 			if l.Added+l.Removed > 0 {
 				p("- **Change size:** +%d / −%d lines\n", l.Added, l.Removed)
 			}
 			if l.SuggestedRef != "" {
-				p("- **Suggested ref:** `%s`\n", l.SuggestedRef)
+				p("- **Suggested ref:** %s\n", code(l.SuggestedRef, false))
 			}
 			if len(l.Findings) > 0 {
 				p("\n**Semantic changes (%s):**\n\n", l.Language)
 				for _, f := range l.Findings {
 					sym := ""
 					if f.Symbol != "" {
-						sym = " `" + f.Symbol + "`"
+						sym = " " + code(f.Symbol, false)
 					}
-					p("- **%s** %s%s — %s\n", f.Severity, f.Kind, sym, f.Message)
+					p("- **%s** %s%s — %s\n", f.Severity, f.Kind, sym, esc(f.Message))
 				}
 			}
 			if len(l.Commits) > 0 {
@@ -188,12 +214,12 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 			}
 			blk := ""
 			if t.Block != "" {
-				blk = "`" + t.Block + "`"
+				blk = code(t.Block, true)
 				if t.BlockStatus != "" {
 					blk = emoji[t.BlockStatus] + " " + blk
 				}
 			}
-			p("| %s | %s | `%s:%d` | %s | %s |\n", icon, prio, t.File, t.Line, blk, todoText(t))
+			p("| %s | %s | %s | %s | %s |\n", icon, prio, code(fmt.Sprintf("%s:%d", t.File, t.Line), true), blk, todoText(t, true))
 		}
 		p("\n")
 	}
@@ -203,12 +229,12 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 			if len(t.Files) == 0 {
 				continue
 			}
-			p("## Coverage: `%s`\n\n", t.Name)
+			p("## Coverage: %s\n\n", code(t.Name, false))
 			p("| File | Coverage | Lines | Links |\n|---|---|---:|---:|\n")
 			files := append([]model.FileCoverage(nil), t.Files...)
 			sort.SliceStable(files, func(i, j int) bool { return files[i].Percent() < files[j].Percent() })
 			for _, f := range files {
-				p("| `%s` | %s %.1f%% | %d/%d | %d |\n", f.Path, bar(f.Percent()), f.Percent(), f.Covered+f.Waived, f.Significant, f.Links)
+				p("| %s | %s %.1f%% | %d/%d | %d |\n", code(f.Path, true), bar(f.Percent()), f.Percent(), f.Covered+f.Waived, f.Significant, f.Links)
 			}
 			p("\n")
 			if o.Symbols {
@@ -220,7 +246,7 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 							if s.Planned {
 								state += " · ☐ planned"
 							}
-							rows = append(rows, fmt.Sprintf("| `%s#%s` | %s | %s | L%d-L%d |", f.Path, s.Name, s.Kind, state, s.Start, s.End))
+							rows = append(rows, fmt.Sprintf("| %s | %s | %s | L%d-L%d |", code(f.Path+"#"+s.Name, true), s.Kind, state, s.Start, s.End))
 						}
 					}
 				}
@@ -234,21 +260,22 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 	return nil
 }
 
-// todoText renders a todo's text with owner, tags, refs and review flags.
-func todoText(t *model.Todo) string {
+// todoText renders a todo's text with owner, tags, refs and review flags,
+// for a table cell when cell is true.
+func todoText(t *model.Todo, cell bool) string {
 	s := esc(t.Text)
 	if t.Owner != "" {
 		s += " · @" + esc(t.Owner)
 	}
 	for _, tag := range t.Tags {
-		s += " `#" + esc(tag) + "`"
+		s += " " + code("#"+tag, cell)
 	}
 	for _, r := range t.Refs {
 		switch r.Status {
 		case model.Missing, model.Error:
-			s += " · ✖️ `" + esc(r.Ref) + "` " + string(r.Status) + ": " + esc(r.Detail)
+			s += " · ✖️ " + code(r.Ref, cell) + " " + string(r.Status) + ": " + esc(r.Detail)
 		default:
-			s += " · → `" + esc(r.Ref) + "`"
+			s += " · → " + code(r.Ref, cell)
 		}
 	}
 	if t.Kind == marker.NoteTodo && (t.BlockStatus == model.Drifted || t.BlockStatus == model.Missing) {
@@ -265,5 +292,5 @@ func todoItem(t *model.Todo) string {
 			icon += " **" + esc(t.Priority) + "**"
 		}
 	}
-	return fmt.Sprintf("%s %s (`%s:%d`)", icon, todoText(t), t.File, t.Line)
+	return fmt.Sprintf("%s %s (%s)", icon, todoText(t, false), code(fmt.Sprintf("%s:%d", t.File, t.Line), false))
 }

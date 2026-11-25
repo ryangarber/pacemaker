@@ -64,11 +64,16 @@ func newParser(src []byte, d *Dialect) *parser {
 		}
 	}
 	if d.MemberAssign {
+		// Scanned up front because the declaration is hoisted: it usually
+		// follows the registration, often in the same IIFE.
 		p.units = map[string]string{}
-		for i := 0; i+6 < len(p.ts); i++ {
-			if kind := d.Registrations[p.word(i+1)]; kind != "" && p.ts[i].Is(".") && p.ts[i+2].Is("(") &&
-				p.ts[i+3].Kind == String && p.ts[i+4].Is(",") && p.ts[i+5].Kind == Ident && p.ts[i+6].Is(")") {
-				p.units[p.ts[i+5].Text] = kind
+		for i := 0; i+5 < len(p.ts); i++ {
+			kind := d.Registrations[p.word(i+1)]
+			if kind == "" || !p.ts[i].Is(".") || !p.ts[i+2].Is("(") || p.ts[i+3].Kind != String || !p.ts[i+4].Is(",") {
+				continue
+			}
+			if ref := p.unitRef(i + 5); ref >= 0 && p.match[i+2] == p.skipGroup0(i+5, len(p.ts)) {
+				p.units[p.ts[ref].Text] = kind
 			}
 		}
 	}
@@ -454,21 +459,18 @@ func (p *parser) emit(start, end, sigEnd int, qual, kind string, exported, isCon
 		startLine = p.all[a].Line
 	}
 	endTok := min(end, len(p.ts)-1)
-	var toks, header []string
-	for j := start; j <= endTok; j++ {
-		toks = append(toks, p.ts[j].Text)
+	hdrEnd := min(sigEnd, endTok+1) // exclusive
+	if hdrEnd-1 == endTok && hdrEnd > start && (p.ts[endTok].Is(";") || p.ts[endTok].Is(",")) {
+		hdrEnd--
 	}
-	for j := start; j < sigEnd && j <= endTok; j++ {
-		if j == endTok && (p.ts[j].Is(";") || p.ts[j].Is(",")) {
-			break
-		}
-		header = append(header, p.ts[j].Text)
-	}
+	// Compared the way Normalize compares, so formatting is never a change.
+	toks := canonical(p.ts[start:endTok+1], p.d)
+	header := canonical(p.ts[start:hdrEnd], p.d)
 	h := sha1.Sum([]byte(strings.Join(toks, " ")))
 	p.decls = append(p.decls, Decl{
 		Symbol: lang.Symbol{
 			Name: qual, Kind: kind, Start: startLine, End: p.ts[endTok].EndLine,
-			Signature: p.sourceText(start, start+len(header)-1), BodyHash: hex.EncodeToString(h[:8]),
+			Signature: p.sourceText(start, hdrEnd-1), BodyHash: hex.EncodeToString(h[:8]),
 			Exported: exported, Container: isCont,
 		},
 		Tokens: toks, Header: header,
@@ -609,6 +611,17 @@ func Normalize(src []byte, d *Dialect) []byte {
 		}
 	}
 	var b strings.Builder
+	for _, text := range canonical(code, d) {
+		b.WriteString(text)
+		b.WriteByte('\n')
+	}
+	return []byte(b.String())
+}
+
+// canonical renders code tokens without trivial formatting differences:
+// trailing commas, semicolons where ASI makes them optional, and quote style.
+func canonical(code []Token, d *Dialect) []string {
+	out := make([]string, 0, len(code))
 	for i, t := range code {
 		if t.Is(",") && i+1 < len(code) && (code[i+1].Is(")") || code[i+1].Is("]") || code[i+1].Is("}")) {
 			continue
@@ -620,10 +633,9 @@ func Normalize(src []byte, d *Dialect) []byte {
 		if t.Kind == String {
 			text = canonicalString(text)
 		}
-		b.WriteString(text)
-		b.WriteByte('\n')
+		out = append(out, text)
 	}
-	return []byte(b.String())
+	return out
 }
 
 func canonicalString(s string) string {
@@ -707,16 +719,20 @@ func Compare(oldSrc, newSrc []byte, d *Dialect) []lang.Finding {
 			out = append(out, lang.Finding{Kind: "visibility", Symbol: name, Severity: lang.SevMinor,
 				Message: "became public/exported"})
 		}
-		if o.Kind != n.Kind {
-			out = append(out, lang.Finding{Kind: "kind-changed", Symbol: name, Severity: lang.SevMajor,
-				Message: o.Kind + " → " + n.Kind})
+		oh, nh, ot, nt := o.Header, n.Header, o.Tokens, n.Tokens
+		if o.Exported != n.Exported { // reported above; not also a signature or body change
+			oh, nh, ot, nt = withoutVisibility(oh, d), withoutVisibility(nh, d), withoutVisibility(ot, d), withoutVisibility(nt, d)
 		}
-		if strings.Join(o.Header, " ") != strings.Join(n.Header, " ") {
+		if o.Kind != n.Kind { // the signature necessarily changed too: one finding
+			out = append(out, lang.Finding{Kind: "kind-changed", Symbol: name,
+				Severity: sev(o.Exported || n.Exported, lang.SevBreaking, lang.SevMajor),
+				Message:  o.Kind + " → " + n.Kind + ": `" + oneLine(o.Signature, 100) + "` → `" + oneLine(n.Signature, 100) + "`"})
+		} else if strings.Join(oh, " ") != strings.Join(nh, " ") {
 			out = append(out, lang.Finding{Kind: "signature-changed", Symbol: name,
 				Severity: sev(n.Exported, lang.SevBreaking, lang.SevMajor),
 				Message:  "`" + oneLine(o.Signature, 100) + "` → `" + oneLine(n.Signature, 100) + "`"})
-		} else if o.BodyHash != n.BodyHash && !n.Container {
-			ins, del := diff.Stats(diff.Lines(o.Tokens, n.Tokens))
+		} else if o.BodyHash != n.BodyHash && !n.Container && strings.Join(ot, " ") != strings.Join(nt, " ") {
+			ins, del := diff.Stats(diff.Lines(ot, nt))
 			out = append(out, lang.Finding{Kind: "body-changed", Symbol: name, Severity: lang.SevMinor,
 				Message: "implementation changed (" + strconv.Itoa(ins) + " tokens added, " + strconv.Itoa(del) + " removed)"})
 		}
@@ -764,6 +780,22 @@ func Compare(oldSrc, newSrc []byte, d *Dialect) []lang.Finding {
 	for _, s := range oldImp {
 		if !ni[s] {
 			out = append(out, lang.Finding{Kind: "import-removed", Severity: lang.SevMinor, Message: oneLine(s, 120)})
+		}
+	}
+	return out
+}
+
+// withoutVisibility drops the dialect's visibility keywords (export, public,
+// ...) leading a declaration's tokens.
+func withoutVisibility(toks []string, d *Dialect) []string {
+	i := 0
+	for i < len(toks) && d.Modifiers[toks[i]] {
+		i++
+	}
+	out := make([]string, 0, len(toks))
+	for j, t := range toks {
+		if j >= i || !d.Visibility[t] {
+			out = append(out, t)
 		}
 	}
 	return out

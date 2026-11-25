@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -291,10 +290,27 @@ func (c *Config) Set(key, value string) error {
 	})
 }
 
-// Unset removes a dotted key.
+// Unset reverts a dotted key to its default: the value Load gives it when it
+// is absent from config.yaml. Keys without a default (a target, an optional
+// field) are removed.
 func (c *Config) Unset(key string) error {
+	base := Default()
+	base.Local = Filter{} // as in Load
+	defaults, err := base.toTree()
+	if err != nil {
+		return err
+	}
+	var def any = defaults
+	for _, k := range splitKey(key) {
+		m, _ := def.(map[string]any)
+		def = m[k]
+	}
 	return c.mutate(key, func(parent map[string]any, last string) error {
-		delete(parent, last)
+		if def == nil {
+			delete(parent, last)
+		} else {
+			parent[last] = def
+		}
 		return nil
 	})
 }
@@ -324,6 +340,10 @@ func splitKey(k string) []string {
 	return strings.Split(strings.Trim(k, "."), ".")
 }
 
+// parseValue turns a command-line value into a tree value. Lists are split
+// on commas; a scalar stays untyped YAML, so the field it lands in decides:
+// a string field keeps the text exactly (a rev of 0123456 or 1e3), an int or
+// bool field parses it, and a value that fits neither fails to decode.
 func parseValue(prev any, v string) any {
 	if _, isList := prev.([]any); isList || strings.HasPrefix(v, "[") {
 		v = strings.Trim(v, "[]")
@@ -335,13 +355,12 @@ func parseValue(prev any, v string) any {
 		}
 		return out
 	}
-	if n, err := strconv.Atoi(v); err == nil {
-		return n
+	n := &yaml.Node{Kind: yaml.ScalarNode, Value: v}
+	switch v {
+	case "", "~", "null", "Null", "NULL": // literal text, not an empty value
+		n.Style = yaml.DoubleQuotedStyle
 	}
-	if b, err := strconv.ParseBool(v); err == nil && (v == "true" || v == "false") {
-		return b
-	}
-	return v
+	return n
 }
 
 // Keys lists all leaf keys in dotted form (for completion / `config list`).

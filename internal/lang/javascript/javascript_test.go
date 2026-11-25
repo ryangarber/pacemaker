@@ -145,3 +145,73 @@ func TestAngularSemanticDiff(t *testing.T) {
 		}
 	}
 }
+
+// Shapes found missing on a real AngularJS 1.x codebase: a byte-order mark
+// before the IIFE, members assigned inside control-flow blocks, and units
+// registered by reference through the annotated array form.
+const ngShapes = "\xEF\xBB\xBF(function () {\n" + // 1
+	"  angular.module('app').controller('statementsCtrl', ['$scope', 'Api', statementsCtrl]);\n" + // 2
+	"  function statementsCtrl($scope, Api) {\n" + // 3
+	"    if (Api.ready) {\n" + // 4
+	"      var vm = this;\n" + // 5
+	"      vm.load = function () {};\n" + // 6
+	"    } else if (Api.retry) {\n" + // 7
+	"      vm.retry = retry;\n" + // 8
+	"    } else {\n" + // 9
+	"      $scope.offline = true;\n" + // 10
+	"    }\n" + // 11
+	"    try { vm.parse = function () {}; } catch { vm.failed = true; } finally { vm.done = 1; }\n" + // 12
+	"    for (var i = 0; i < 2; i++) { vm.looped = i; }\n" + // 13
+	"    switch (Api.mode) {\n" + // 14
+	"      case 'a': vm.modeA = function () {}; break;\n" + // 15
+	"      default: vm.modeOther = 1;\n" + // 16
+	"    }\n" + // 17
+	"    if (Api.debug) vm.debug = true;\n" + // 18
+	"    Api.get(function () { vm.notInCallback = 1; this.norThis = 2; });\n" + // 19
+	"    function retry() {}\n" + // 20
+	"  }\n" + // 21
+	"})();\n"
+
+func TestAngularShapes(t *testing.T) {
+	got := map[string]string{}
+	spans := map[string][2]int{}
+	count := map[string]int{}
+	for _, s := range (Module{}).Symbols([]byte(ngShapes)) {
+		got[s.Name] = s.Kind
+		spans[s.Name] = [2]int{s.Start, s.End}
+		count[s.Name]++
+	}
+	want := map[string]string{
+		"statementsCtrl": "controller", "statementsCtrl.load": "method", "statementsCtrl.retry": "function",
+		"statementsCtrl.$scope.offline": "field", "statementsCtrl.parse": "method", "statementsCtrl.failed": "field",
+		"statementsCtrl.done": "field", "statementsCtrl.looped": "field", "statementsCtrl.modeA": "method",
+		"statementsCtrl.modeOther": "field", "statementsCtrl.debug": "field",
+	}
+	for n, k := range want {
+		if got[n] != k {
+			t.Errorf("%s: got kind %q, want %q (all: %v)", n, got[n], k, got)
+		}
+	}
+	for _, n := range []string{"statementsCtrl.notInCallback", "statementsCtrl.norThis", "statementsCtrl.i"} {
+		if _, ok := got[n]; ok {
+			t.Errorf("%s must not be a symbol", n)
+		}
+	}
+	if count["statementsCtrl"] != 1 {
+		t.Errorf("statementsCtrl emitted %d times; the registration must not be a second symbol", count["statementsCtrl"])
+	}
+	if spans["statementsCtrl"] != [2]int{3, 21} {
+		t.Errorf("statementsCtrl span = %v, want the function declaration", spans["statementsCtrl"])
+	}
+	if spans["statementsCtrl.modeA"] != [2]int{15, 15} {
+		t.Errorf("modeA span = %v, want line 15 without its case label", spans["statementsCtrl.modeA"])
+	}
+}
+
+func TestBOMIsWhitespace(t *testing.T) {
+	with := Module{}.Normalize([]byte("\xEF\xBB\xBFfoo(1);\n"))
+	without := Module{}.Normalize([]byte("foo(1);\n"))
+	if string(with) != string(without) {
+		t.Errorf("BOM changed normalisation: %q vs %q", with, without)
+	}
+}

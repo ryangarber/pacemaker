@@ -4,6 +4,7 @@ package text
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/ryangarber/pacemaker/internal/marker"
@@ -200,9 +201,11 @@ func LinkDetail(w io.Writer, p tu.Painter, l *model.Link, diffs bool) {
 func FileTable(w io.Writer, p tu.Painter, t model.TargetReport, limit int) {
 	fmt.Fprintf(w, "%s %s\n", p.S("coverage", tu.Bold), p.S(t.Name, tu.Cyan))
 	tb := tu.Table{Header: []string{"FILE", "", "COVERAGE", "LINES", "LINKS"}, Right: map[int]bool{2: true, 3: true, 4: true}, Indent: "  "}
-	for i, f := range t.Files {
+	files := append([]model.FileCoverage(nil), t.Files...)
+	sort.SliceStable(files, func(i, j int) bool { return files[i].Percent() < files[j].Percent() })
+	for i, f := range files {
 		if limit > 0 && i >= limit {
-			tb.Add(p.S(fmt.Sprintf("… %d more", len(t.Files)-limit), tu.Gray), "", "", "", "")
+			tb.Add(p.S(fmt.Sprintf("… %d more", len(files)-limit), tu.Gray), "", "", "", "")
 			break
 		}
 		pw := 100 * float64(f.Waived) / float64(max(f.Significant, 1))

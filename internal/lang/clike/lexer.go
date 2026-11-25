@@ -56,6 +56,10 @@ type Dialect struct {
 	DeclKeywords map[string]bool
 	// Modifiers are skipped when looking for names.
 	Modifiers map[string]bool
+	// Visibility are the modifiers that only change who can see a symbol
+	// (export, public, ...). Compare reports a change in them once, as a
+	// visibility change, rather than also as a signature change.
+	Visibility map[string]bool
 	// Imports are statement-leading keywords for import-like statements.
 	Imports map[string]bool
 	// Skip are statement-leading keywords that never declare symbols.
@@ -96,6 +100,9 @@ var regexPrecedingWords = map[string]bool{
 	"instanceof": true, "new": true, "delete": true, "void": true, "throw": true,
 	"yield": true, "await": true, "of": true,
 }
+
+// bom is the UTF-8 byte-order mark, U+FEFF: whitespace wherever it appears.
+const bom = "\xEF\xBB\xBF"
 
 type lexer struct {
 	src  string
@@ -145,6 +152,11 @@ func (lx *lexer) run() {
 		c := lx.src[lx.i]
 		start, startLine := lx.i, lx.line
 		switch {
+		case strings.HasPrefix(lx.src[lx.i:], bom):
+			// Byte-order mark: whitespace. isIdentStart accepts any byte >= 0x80,
+			// so without this it would start an identifier and hide whatever
+			// follows (a leading IIFE). Offsets are kept.
+			lx.i += 3
 		case c == '\n':
 			lx.advance(1)
 			lx.nl = true
@@ -181,7 +193,7 @@ func (lx *lexer) run() {
 			}
 			lx.emit(Number, start, startLine)
 		case isIdentStart(c):
-			for lx.i < len(lx.src) && isIdentPart(lx.src[lx.i]) {
+			for lx.i < len(lx.src) && isIdentPart(lx.src[lx.i]) && !strings.HasPrefix(lx.src[lx.i:], bom) {
 				lx.i++
 			}
 			lx.emit(Ident, start, startLine)

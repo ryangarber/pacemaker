@@ -12,6 +12,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -122,16 +124,16 @@ func (s *State) Put(block string, b *Baseline, snapshot []byte) error {
 func (s *State) Remove(block, refKey string) {
 	if refKey == "" {
 		for _, b := range s.Links[block] {
-			_ = os.Remove(s.SnapshotPath(block, b.Ref))
+			s.removeSnapshot(block, b.Ref)
 		}
 		delete(s.Links, block)
-		_ = os.Remove(filepath.Join(s.root, config.Dir, config.SnapDir, safe(block)))
+		_ = os.Remove(s.snapDir(block)) // only if empty: another block may share it
 		return
 	}
 	var keep []*Baseline
 	for _, b := range s.Links[block] {
 		if b.Ref == refKey {
-			_ = os.Remove(s.SnapshotPath(block, b.Ref))
+			s.removeSnapshot(block, b.Ref)
 			continue
 		}
 		keep = append(keep, b)
@@ -143,14 +145,40 @@ func (s *State) Remove(block, refKey string) {
 	}
 }
 
-// Snapshot reads the stored upstream content for a baseline.
+// Snapshot reads the stored upstream content for a baseline, from where
+// earlier versions wrote it if it has not been accepted since.
 func (s *State) Snapshot(block, refKey string) ([]byte, error) {
-	return os.ReadFile(s.SnapshotPath(block, refKey))
+	b, err := os.ReadFile(s.SnapshotPath(block, refKey))
+	if errors.Is(err, fs.ErrNotExist) {
+		if old, oldErr := os.ReadFile(s.legacySnapshotPath(block, refKey)); oldErr == nil {
+			return old, nil
+		}
+	}
+	return b, err
 }
 
-// SnapshotPath is where a baseline's snapshot lives.
+// SnapshotPath is where a baseline's snapshot lives. safe() is lossy (a
+// space and an underscore both become "_"), so the name carries a hash of
+// the exact block and ref, keeping every baseline's snapshot its own.
 func (s *State) SnapshotPath(block, refKey string) string {
-	return filepath.Join(s.root, config.Dir, config.SnapDir, safe(block), safe(refKey)+".snap")
+	h := sha256.Sum256([]byte(block + "\x00" + refKey))
+	return filepath.Join(s.snapDir(block), safe(refKey)+"-"+hex.EncodeToString(h[:4])+".snap")
+}
+
+// legacySnapshotPath is where versions up to 0.1.0 wrote a snapshot. It is
+// read when the current path is missing and removed with the baseline.
+func (s *State) legacySnapshotPath(block, refKey string) string {
+	return filepath.Join(s.snapDir(block), safe(refKey)+".snap")
+}
+
+func (s *State) snapDir(block string) string {
+	return filepath.Join(s.root, config.Dir, config.SnapDir, safe(block))
+}
+
+// removeSnapshot deletes a baseline's snapshot wherever it was written.
+func (s *State) removeSnapshot(block, refKey string) {
+	_ = os.Remove(s.SnapshotPath(block, refKey))
+	_ = os.Remove(s.legacySnapshotPath(block, refKey))
 }
 
 // Blocks returns sorted block IDs.
