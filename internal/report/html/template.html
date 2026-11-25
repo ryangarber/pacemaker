@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>
+:root{--bg:#fff;--fg:#1f2328;--muted:#656d76;--line:#d0d7de;--card:#f6f8fa;--good:#1a7f37;--warn:#9a6700;--bad:#cf222e;--info:#0969da;--waive:#1b7c83;--new:#8250df;
+--add-bg:#e6ffec;--del-bg:#ffebe9;--hunk:#ddf4ff}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--muted:#8d96a0;--line:#30363d;--card:#161b22;--good:#3fb950;--warn:#d29922;--bad:#f85149;--info:#58a6ff;--waive:#39c5cf;--new:#a371f7;
+--add-bg:#12261e;--del-bg:#25171c;--hunk:#121d2f}}
+*{box-sizing:border-box}body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg)}
+main{max-width:1180px;margin:0 auto;padding:24px}
+h1{font-size:22px;margin:0 0 4px}h2{font-size:17px;margin:32px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.muted{color:var(--muted)}code,.mono{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.verdict{display:inline-block;padding:2px 10px;border-radius:999px;font-weight:600;font-size:12px;margin-right:8px}
+.verdict.ok{background:color-mix(in srgb,var(--good) 18%,transparent);color:var(--good)}
+.verdict.bad{background:color-mix(in srgb,var(--warn) 18%,transparent);color:var(--warn)}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin:18px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px;cursor:pointer;user-select:none}
+.card.off{opacity:.45}.card .n{font-size:22px;font-weight:600}.card .l{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.s-ok{color:var(--good)}.s-moved{color:var(--waive)}.s-cosmetic{color:var(--info)}.s-drifted{color:var(--warn)}.s-missing,.s-error{color:var(--bad)}.s-new{color:var(--new)}
+table{width:100%;border-collapse:collapse;margin:8px 0}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em}td.num,th.num{text-align:right;white-space:nowrap}
+.bar{display:inline-flex;width:140px;height:8px;border-radius:4px;overflow:hidden;background:var(--line);vertical-align:middle;margin-right:8px}
+.bar i{display:block;height:100%}.bar .good{background:var(--good)}.bar .warn{background:var(--warn)}.bar .bad{background:var(--bad)}.bar .waive{background:var(--waive)}
+details.link{border:1px solid var(--line);border-radius:8px;margin:10px 0;background:var(--card)}
+details.link>summary{padding:10px 12px;cursor:pointer;list-style:none;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+details.link>summary::-webkit-details-marker{display:none}details.link .body{padding:0 14px 12px;border-top:1px solid var(--line)}
+.kv{display:grid;grid-template-columns:120px 1fr;gap:2px 12px;margin:10px 0}.kv dt{color:var(--muted)}.kv dd{margin:0}
+.sev{display:inline-block;min-width:68px;font-size:11px;font-weight:600;text-transform:uppercase}.sev-breaking{color:var(--bad)}.sev-major{color:var(--warn)}.sev-minor{color:var(--info)}.sev-info{color:var(--muted)}
+pre.diff{background:var(--bg);border:1px solid var(--line);border-radius:6px;overflow:auto;padding:6px 0;margin:8px 0}
+pre.diff span{display:block;padding:0 10px;white-space:pre}.diff .add{background:var(--add-bg)}.diff .del{background:var(--del-bg)}.diff .hunk{background:var(--hunk);color:var(--muted)}.diff .hdr{font-weight:600}
+.tag{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:0 8px;font-size:11px;color:var(--muted)}
+.problems li{margin:4px 0}.hidden{display:none!important}
+footer{margin:40px 0 10px;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body><main>
+<h1>{{.Title}}</h1>
+<div>{{if .Failing}}<span class="verdict bad">Needs attention</span>{{else}}<span class="verdict ok">In sync</span>{{end}}<span class="muted">Generated {{date .Generated}}</span></div>
+
+<div class="cards" id="filters">
+{{range .Statuses}}{{$n := index $.Counts .}}{{if $n}}<div class="card" data-status="{{.}}"><div class="n s-{{.}}">{{icon .}} {{$n}}</div><div class="l">{{.}}</div></div>{{end}}{{end}}
+{{if .Total.Files}}<div class="card" style="cursor:default"><div class="n">{{pct .Total.Percent}}%</div><div class="l">line coverage</div></div>{{end}}
+{{if .Total.Symbols}}<div class="card" style="cursor:default"><div class="n">{{pct .Total.SymbolPercent}}%</div><div class="l">symbol coverage</div></div>{{end}}
+</div>
+
+<h2>Targets</h2>
+<table><thead><tr><th>Target</th><th>Location</th><th>Revision</th><th>Line coverage</th><th class="num">Symbols</th><th class="num">Files</th></tr></thead><tbody>
+{{range .Targets}}<tr><td><code>{{.Name}}</code></td><td class="mono">{{.Location}}{{if .Include}}<div class="muted">include: {{join .Include ", "}}</div>{{end}}{{if .Exclude}}<div class="muted">exclude: {{join .Exclude ", "}}</div>{{end}}</td>
+{{if .Error}}<td colspan="4" class="s-error">{{.Error}}</td>{{else}}
+<td><code>{{short .Revision}}</code>{{if .Dirty}} <span class="tag">dirty</span>{{end}}</td>
+<td>{{if .Totals.Files}}{{$w := waivedPct .Totals.Waived .Totals.Significant}}<span class="bar"><i class="{{tone .Totals.Percent}}" style="width:{{sub .Totals.Percent $w}}%"></i><i class="waive" style="width:{{$w}}%"></i></span>{{pct .Totals.Percent}}%{{else}}—{{end}}</td>
+<td class="num">{{if .Totals.Symbols}}{{pct .Totals.SymbolPercent}}% <span class="muted">({{.Totals.SymbolsCovered}}+{{.Totals.SymbolsWaived}}/{{.Totals.Symbols}})</span>{{else}}—{{end}}</td>
+<td class="num">{{.Totals.FilesTouched}}/{{.Totals.Files}}</td>{{end}}</tr>{{end}}
+</tbody></table>
+
+{{if .Problems}}<h2 class="s-error">Marker problems</h2><ul class="problems">{{range .Problems}}<li><code>{{.File}}:{{.Line}}</code> — {{.Message}}</li>{{end}}</ul>{{end}}
+
+{{if .Links}}<h2>Links</h2>
+{{range .Links}}<details class="link" data-status="{{.Status}}"{{if or (eq .Status "drifted") (eq .Status "missing")}} open{{end}}>
+<summary><strong class="s-{{.Status}}">{{icon .Status}} {{.Status}}</strong> <code><b>{{.Block}}</b></code> <span class="muted">→</span> <code>{{.Ref}}</code>
+{{if .LocalChanged}}<span class="tag">local edited</span>{{end}}{{range .Tags}}<span class="tag">{{.}}</span>{{end}}
+<span class="muted" style="margin-left:auto">{{.LocalFile}}:{{.MarkerLine}}</span></summary>
+<div class="body">
+<dl class="kv">
+{{if .Detail}}<dt>Detail</dt><dd>{{.Detail}}</dd>{{end}}
+{{if .Note}}<dt>Note</dt><dd>{{.Note}}</dd>{{end}}
+<dt>Local</dt><dd><code>{{.LocalFile}}</code> {{if .LocalStart}}lines {{.LocalStart}}–{{.LocalEnd}}{{end}} <span class="muted">({{.Kind}})</span></dd>
+{{with .Baseline}}<dt>Accepted</dt><dd><code>{{short .Revision}}</code> <code>{{.Path}}</code> {{.Range}} · {{date .AcceptedAt}}{{if .AcceptedBy}} by {{.AcceptedBy}}{{end}}</dd>{{end}}
+{{if .Range.Start}}<dt>Now</dt><dd><code>{{short .Revision}}</code> <code>{{.Current}}</code> {{.Range}}</dd>{{end}}
+{{if or .Added .Removed}}<dt>Change</dt><dd><span class="s-ok">+{{.Added}}</span> <span class="s-missing">−{{.Removed}}</span> lines</dd>{{end}}
+{{if .SuggestedRef}}<dt>Suggested ref</dt><dd><code>{{.SuggestedRef}}</code></dd>{{end}}
+</dl>
+{{if .Findings}}<div class="muted">Semantic changes ({{.Language}})</div><table><tbody>{{range .Findings}}<tr><td style="width:90px"><span class="sev sev-{{.Severity}}">{{.Severity}}</span></td><td style="width:150px" class="muted">{{.Kind}}</td><td>{{if .Symbol}}<code>{{.Symbol}}</code> {{end}}{{plain .Message}}</td></tr>{{end}}</tbody></table>{{end}}
+{{if .Commits}}<div class="muted">Upstream commits since accept</div><table><tbody>{{range .Commits}}<tr><td style="width:100px"><code>{{.Short}}</code></td><td style="width:100px" class="muted">{{.Date}}</td><td>{{.Subject}} <span class="muted">— {{.Author}}</span></td></tr>{{end}}</tbody></table>{{end}}
+{{if and $.Opts.Diffs .Diff}}<pre class="diff mono">{{range diffLines .Diff}}<span class="{{.Class}}">{{.Text}}</span>{{end}}</pre>{{end}}
+</div></details>{{end}}{{end}}
+
+{{if .Opts.Files}}{{range .Targets}}{{if .Files}}<h2>Coverage · <code>{{.Name}}</code></h2>
+<table><thead><tr><th>File</th><th>Coverage</th><th class="num">Lines</th><th class="num">Links</th></tr></thead><tbody>
+{{range worstFirst .Files}}{{$w := waivedPct .Waived .Significant}}<tr><td><code>{{.Path}}</code>
+{{if $.Opts.Symbols}}{{with unported .}}<details><summary class="muted">{{len .}} unported symbol(s)</summary><table><tbody>{{range .}}<tr><td><code>{{.Name}}</code></td><td class="muted">{{.Kind}}</td><td>{{.State}}</td><td class="muted">L{{.Start}}-L{{.End}}</td></tr>{{end}}</tbody></table></details>{{end}}{{end}}</td>
+<td><span class="bar"><i class="{{tone .Percent}}" style="width:{{sub .Percent $w}}%"></i><i class="waive" style="width:{{$w}}%"></i></span>{{pct .Percent}}%</td>
+<td class="num">{{.Covered}}{{if .Waived}}+{{.Waived}}{{end}}/{{.Significant}}</td><td class="num">{{.Links}}</td></tr>{{end}}
+</tbody></table>{{end}}{{end}}{{end}}
+
+<footer>Generated by pacemaker · project <code>{{.Project}}</code></footer>
+</main>
+<script>
+(function(){var off={};document.querySelectorAll('#filters .card[data-status]').forEach(function(c){c.addEventListener('click',function(){var s=c.dataset.status;off[s]=!off[s];c.classList.toggle('off',off[s]);
+document.querySelectorAll('details.link').forEach(function(d){d.classList.toggle('hidden',!!off[d.dataset.status])});});});})();
+</script>
+</body></html>
