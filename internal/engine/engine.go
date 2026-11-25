@@ -39,6 +39,7 @@ type Engine struct {
 	scanner *marker.Scanner
 
 	blocks   []marker.Block
+	todos    []marker.Todo
 	problems []marker.Problem
 	scanned  bool
 	ctx      []*linkCtx
@@ -136,6 +137,7 @@ func (e *Engine) Scan() ([]marker.Block, []marker.Problem, error) {
 	}
 	filter := e.Cfg.Local.Set()
 	var blocks []marker.Block
+	var todos []marker.Todo
 	var probs []marker.Problem
 	err := filepath.WalkDir(e.Root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -159,8 +161,9 @@ func (e *Engine) Scan() ([]marker.Block, []marker.Problem, error) {
 		if err != nil || isBinary(b) || !e.scanner.Contains(b) {
 			return nil
 		}
-		bs, ps := e.scanner.Scan(rel, b)
+		bs, ts, ps := e.scanner.ScanAll(rel, b)
 		blocks = append(blocks, bs...)
+		todos = append(todos, ts...)
 		probs = append(probs, ps...)
 		return nil
 	})
@@ -180,18 +183,36 @@ func (e *Engine) Scan() ([]marker.Block, []marker.Problem, error) {
 		uniq = append(uniq, b)
 	}
 	// Unknown targets.
-	for _, b := range uniq {
-		for _, rs := range b.Refs {
-			t := rs.Ref.Target
-			if t == "" {
-				if _, err := e.Cfg.ResolveTarget(""); err != nil {
-					probs = append(probs, marker.Problem{File: b.File, Line: rs.Line, Message: "reference has no target and " + err.Error()})
-				}
-			} else if _, ok := e.Cfg.Targets[t]; !ok {
-				probs = append(probs, marker.Problem{File: b.File, Line: rs.Line, Message: fmt.Sprintf("unknown target %q", t)})
+	checkTarget := func(file string, rs marker.RefSite) {
+		t := rs.Ref.Target
+		if t == "" {
+			if _, err := e.Cfg.ResolveTarget(""); err != nil {
+				probs = append(probs, marker.Problem{File: file, Line: rs.Line, Message: "reference has no target and " + err.Error()})
 			}
+		} else if _, ok := e.Cfg.Targets[t]; !ok {
+			probs = append(probs, marker.Problem{File: file, Line: rs.Line, Message: fmt.Sprintf("unknown target %q", t)})
 		}
 	}
+	for _, b := range uniq {
+		for _, rs := range b.Refs {
+			checkTarget(b.File, rs)
+		}
+	}
+	for _, t := range todos {
+		for _, rs := range t.Refs {
+			checkTarget(t.File, rs)
+		}
+		if _, ok := seen[t.Block]; t.Explicit && !ok {
+			probs = append(probs, marker.Problem{File: t.File, Line: t.Line,
+				Message: fmt.Sprintf("@pace:%s block=%q: no such block", t.Kind, t.Block)})
+		}
+	}
+	sort.SliceStable(todos, func(i, j int) bool {
+		if todos[i].File != todos[j].File {
+			return todos[i].File < todos[j].File
+		}
+		return todos[i].Line < todos[j].Line
+	})
 	sort.Slice(uniq, func(i, j int) bool { return uniq[i].ID < uniq[j].ID })
 	sort.Slice(probs, func(i, j int) bool {
 		if probs[i].File != probs[j].File {
@@ -199,8 +220,16 @@ func (e *Engine) Scan() ([]marker.Block, []marker.Problem, error) {
 		}
 		return probs[i].Line < probs[j].Line
 	})
-	e.blocks, e.problems, e.scanned = uniq, probs, true
+	e.blocks, e.todos, e.problems, e.scanned = uniq, todos, probs, true
 	return uniq, probs, nil
+}
+
+// Todos returns the @pace:todo / @pace:note annotations found by Scan.
+func (e *Engine) Todos() ([]marker.Todo, error) {
+	if _, _, err := e.Scan(); err != nil {
+		return nil, err
+	}
+	return e.todos, nil
 }
 
 func isBinary(b []byte) bool {
@@ -264,12 +293,13 @@ func (e *Engine) Analyze(opts Options) (*model.Report, error) {
 			rep.Links = append(rep.Links, lc.L)
 		}
 	}
+	rep.Todos = e.resolveTodos(rep.Links, def, only)
 	if opts.Coverage {
 		for _, name := range e.Cfg.TargetNames() {
 			if len(only) > 0 && !only[name] {
 				continue
 			}
-			rep.Targets = append(rep.Targets, e.coverage(name, rep.Links))
+			rep.Targets = append(rep.Targets, e.coverage(name, rep.Links, rep.Todos))
 		}
 	} else {
 		for _, name := range e.Cfg.TargetNames() {
@@ -281,13 +311,86 @@ func (e *Engine) Analyze(opts Options) (*model.Report, error) {
 	}
 	rep.Sort()
 	rep.Count()
-	rep.Failing = e.failing(rep)
+	rep.SortTodos()
+	rep.CountTodos()
+	rep.FailReasons = e.failReasons(rep)
+	rep.Failing = len(rep.FailReasons) > 0
 	return rep, nil
 }
 
-func (e *Engine) failing(rep *model.Report) bool {
-	if len(rep.Problems) > 0 {
-		return true
+// resolveTodos converts scanned todos to report todos: upstream refs are
+// located in the current target and each todo is linked to its block.
+func (e *Engine) resolveTodos(links []*model.Link, def string, only map[string]bool) []*model.Todo {
+	byBlock := map[string][]*model.Link{}
+	for _, l := range links {
+		byBlock[l.Block] = append(byBlock[l.Block], l)
+	}
+	var out []*model.Todo
+	for _, mt := range e.todos {
+		t := &model.Todo{Kind: mt.Kind, File: mt.File, Line: mt.Line, Text: mt.Text, Owner: mt.Owner,
+			Priority: mt.Priority, Tags: mt.Tags, Block: mt.Block}
+		for _, l := range byBlock[mt.Block] {
+			if l.Status.Rank() > t.BlockStatus.Rank() {
+				t.BlockStatus = l.Status
+			}
+			l.Todos = append(l.Todos, t)
+		}
+		for _, rs := range mt.Refs {
+			r := rs.Ref.WithTarget(def)
+			if len(only) > 0 && !only[r.Target] {
+				continue
+			}
+			t.Refs = append(t.Refs, e.locateRef(r))
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// locateRef finds where a reference currently points, without a baseline.
+func (e *Engine) locateRef(r ref.Ref) model.TodoRef {
+	tr := model.TodoRef{Ref: r.String(), Target: r.Target, Path: r.Path, Current: r.Path, Symbol: r.Symbol, Status: model.OK}
+	set := func(s model.Status, f string, a ...any) model.TodoRef {
+		tr.Status, tr.Detail = s, fmt.Sprintf(f, a...)
+		return tr
+	}
+	src, err := e.Source(r.Target)
+	if err != nil {
+		return set(model.Error, "%v", err)
+	}
+	cur, err := src.ReadFile(r.Path)
+	if err != nil {
+		return set(model.Missing, "file %s not found in %s", r.Path, r.Target)
+	}
+	lines := diff.SplitLines(string(cur))
+	switch r.Kind() {
+	case "file":
+		tr.Range = ref.Range{Start: 1, End: len(lines)}
+	case "symbol":
+		language := lang.ForPath(r.Path)
+		sp, ok := language.(lang.SymbolProvider)
+		if !ok {
+			return set(model.Error, "language module %q cannot resolve symbols", language.ID())
+		}
+		sym, ok := lang.FindSymbol(sp.Symbols(cur), r.Symbol)
+		if !ok {
+			return set(model.Missing, "symbol %s not found in %s", r.Symbol, r.Path)
+		}
+		tr.Range = ref.Range{Start: sym.Start, End: sym.End}
+	case "lines":
+		if r.Lines.Start > len(lines) {
+			return set(model.Missing, "lines %s are beyond the end of %s (%d lines)", r.Lines, r.Path, len(lines))
+		}
+		tr.Range = clampRange(r.Lines, len(lines))
+	}
+	return tr
+}
+
+// failReasons lists why `check` should fail (empty: passing).
+func (e *Engine) failReasons(rep *model.Report) []string {
+	var out []string
+	if n := len(rep.Problems); n > 0 {
+		out = append(out, fmt.Sprintf("%d marker problem(s)", n))
 	}
 	fail := map[string]bool{}
 	for _, s := range e.Cfg.Drift.FailOn {
@@ -296,12 +399,35 @@ func (e *Engine) failing(rep *model.Report) bool {
 	if e.Cfg.Drift.Cosmetic == "fail" {
 		fail[string(model.Cosmetic)] = true
 	}
-	for _, l := range rep.Links {
-		if fail[string(l.Status)] {
-			return true
+	for _, s := range model.Statuses {
+		if n := rep.Counts[s]; n > 0 && fail[string(s)] {
+			out = append(out, fmt.Sprintf("%d %s link(s)", n, s))
 		}
 	}
-	return false
+	for _, cond := range e.Cfg.Todo.FailOn {
+		n := 0
+		for _, t := range rep.Todos {
+			switch {
+			case cond == "stale":
+				if t.Stale() {
+					n++
+				}
+			case t.Kind != marker.NoteTodo:
+			case cond == "any",
+				cond == "review" && t.NeedsReview(),
+				cond == model.PriorityClass(t.Priority):
+				n++
+			}
+		}
+		if n > 0 {
+			label := map[string]string{"any": "open", "stale": "stale", "review": "needs-review"}[cond]
+			if label == "" {
+				label = cond + "-priority"
+			}
+			out = append(out, fmt.Sprintf("%d %s todo(s) (todo.fail_on: %s)", n, label, cond))
+		}
+	}
+	return out
 }
 
 func (e *Engine) targetHeader(name string) model.TargetReport {
@@ -625,11 +751,10 @@ func (e *Engine) explain(lc *linkCtx, base *state.Baseline, language lang.Langua
 		l.Findings = sd.Compare(snap, lc.Snippet)
 		// Snippets are parsed out of context; re-qualify symbol names with
 		// the referenced symbol's container (e.g. "login" → "AuthService.login").
-		if i := strings.LastIndex(l.Symbol, "."); i > 0 {
-			parent := l.Symbol[:i]
+		if l.Symbol != "" {
 			for k := range l.Findings {
-				if f := &l.Findings[k]; f.Symbol != "" && !strings.HasPrefix(f.Symbol, parent+".") {
-					f.Symbol = parent + "." + f.Symbol
+				if f := &l.Findings[k]; f.Symbol != "" {
+					f.Symbol = requalify(l.Symbol, f.Symbol)
 				}
 			}
 		}
@@ -648,6 +773,26 @@ func (e *Engine) explain(lc *linkCtx, base *state.Baseline, language lang.Langua
 
 // Selector picks links for accept.
 type Selector func(*model.Link) bool
+
+// requalify places a symbol name parsed from a snippet under the referenced
+// symbol, merging overlapping segments: ref "C.$scope.login" + "$scope.login"
+// → "C.$scope.login"; ref "A.login" + "login" → "A.login"; ref "A.b" + "c"
+// → "A.c".
+func requalify(refSym, name string) string {
+	rs, ns := strings.Split(refSym, "."), strings.Split(name, ".")
+	if ns[0] == rs[0] {
+		return name // already fully qualified
+	}
+	for k := min(len(rs), len(ns)); k > 0; k-- {
+		if strings.Join(rs[len(rs)-k:], ".") == strings.Join(ns[:k], ".") {
+			return strings.Join(append(rs[:len(rs)-k:len(rs)-k], ns...), ".")
+		}
+	}
+	if len(rs) > 1 {
+		return strings.Join(append(rs[:len(rs)-1:len(rs)-1], ns...), ".")
+	}
+	return name
+}
 
 // Accept records the current upstream state as the baseline for the selected
 // links. It must be called after Analyze. Returns accepted links.

@@ -70,6 +70,18 @@ type Drift struct {
 	MaxCommits int `yaml:"max_commits" json:"max_commits"`
 }
 
+// Todo configures how @pace:todo annotations affect `pacemaker check`.
+type Todo struct {
+	// FailOn lists conditions that make `check` fail: a priority (blocker,
+	// high, normal, low), "any" (any open todo), "stale" (a todo/note whose
+	// upstream ref no longer resolves) or "review" (an open todo whose block
+	// drifted or went missing upstream). Empty: todos never fail the check.
+	FailOn []string `yaml:"fail_on" json:"fail_on"`
+}
+
+// TodoFailOnValues are the accepted todo.fail_on entries.
+var TodoFailOnValues = []string{"any", "blocker", "high", "normal", "low", "stale", "review"}
+
 // Report sets default report options.
 type Report struct {
 	Format string `yaml:"format" json:"format"`
@@ -85,6 +97,7 @@ type Config struct {
 	Local         Filter            `yaml:"local" json:"local"`
 	Targets       map[string]Target `yaml:"targets" json:"targets"`
 	Drift         Drift             `yaml:"drift" json:"drift"`
+	Todo          Todo              `yaml:"todo" json:"todo"`
 	Report        Report            `yaml:"report" json:"report"`
 }
 
@@ -103,6 +116,7 @@ func Default() *Config {
 			Context:    3,
 			MaxCommits: 10,
 		},
+		Todo:   Todo{FailOn: []string{}},
 		Report: Report{Format: "markdown"},
 	}
 }
@@ -158,6 +172,15 @@ func (c *Config) Validate() error {
 	case "ok", "warn", "fail":
 	default:
 		return fmt.Errorf("drift.cosmetic must be ok, warn or fail (got %q)", c.Drift.Cosmetic)
+	}
+	for _, v := range c.Todo.FailOn {
+		ok := false
+		for _, a := range TodoFailOnValues {
+			ok = ok || v == a
+		}
+		if !ok {
+			return fmt.Errorf("todo.fail_on: unknown value %q (use %s)", v, strings.Join(TodoFailOnValues, ", "))
+		}
 	}
 	return nil
 }

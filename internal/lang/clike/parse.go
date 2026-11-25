@@ -27,6 +27,9 @@ type parser struct {
 	match []int   // bracket matches over ts (-1 when unmatched)
 	decls []Decl
 	imps  []string
+	// units maps identifiers registered by name (`.controller('X', X)`) to
+	// the registration kind, so `function X() {...}` is parsed as that unit.
+	units map[string]string
 }
 
 func newParser(src []byte, d *Dialect) *parser {
@@ -57,6 +60,15 @@ func newParser(src []byte, d *Dialect) *parser {
 					stack = stack[:k]
 					break
 				}
+			}
+		}
+	}
+	if d.MemberAssign {
+		p.units = map[string]string{}
+		for i := 0; i+6 < len(p.ts); i++ {
+			if kind := d.Registrations[p.word(i+1)]; kind != "" && p.ts[i].Is(".") && p.ts[i+2].Is("(") &&
+				p.ts[i+3].Kind == String && p.ts[i+4].Is(",") && p.ts[i+5].Kind == Ident && p.ts[i+6].Is(")") {
+				p.units[p.ts[i+5].Text] = kind
 			}
 		}
 	}
@@ -121,6 +133,15 @@ func (p *parser) decoratorsOnly(lo, hi int) bool {
 
 // scope parses declarations in ts[lo:hi].
 func (p *parser) scope(lo, hi int, prefix, container, containerKind string) {
+	p.statements(lo, hi, containerKind == "enum", func(start, end, body int) {
+		p.classify(start, end, body, prefix, container, containerKind)
+	})
+}
+
+// statements splits ts[lo:hi] into statements/member declarations and calls
+// visit with each one's token span and the index of the "{" opening its
+// declaration body (-1 if none). enum splits on commas.
+func (p *parser) statements(lo, hi int, enum bool, visit func(start, end, body int)) {
 	i := lo
 	for i < hi {
 		t := p.ts[i]
@@ -152,7 +173,7 @@ func (p *parser) scope(lo, hi int, prefix, container, containerKind string) {
 					end = j
 					break scan
 				case ",":
-					if containerKind == "enum" {
+					if enum {
 						end = j - 1
 						break scan
 					}
@@ -188,7 +209,7 @@ func (p *parser) scope(lo, hi int, prefix, container, containerKind string) {
 		if end < start {
 			end = start
 		}
-		p.classify(start, end, body, prefix, container, containerKind)
+		visit(start, end, body)
 		i = end + 1
 	}
 }
@@ -226,6 +247,9 @@ func (p *parser) classify(start, end, body int, prefix, container, containerKind
 		p.imps = append(p.imps, strings.Join(parts, " "))
 		return
 	}
+	if topLevel && p.d.MemberAssign && p.jsStatement(start, k, end, prefix) {
+		return
+	}
 	if topLevel && p.d.Skip[first] { // class bodies only contain declarations
 		return
 	}
@@ -245,8 +269,12 @@ func (p *parser) classify(start, end, body int, prefix, container, containerKind
 	}
 	if container == "" && p.d.TopLevelNeedsKeyword {
 		ok := false
-		for _, j := range top {
-			if p.d.DeclKeywords[p.word(j)] || p.d.Containers[p.word(j)] != "" {
+		for n, j := range top {
+			w := p.word(j)
+			if p.isProperty(top, n) {
+				continue // obj.class, angular.module(...)
+			}
+			if p.d.DeclKeywords[w] || (p.d.Containers[w] != "" && !p.isCall(top, n)) {
 				ok = true
 				break
 			}
@@ -281,6 +309,9 @@ func (p *parser) classify(start, end, body int, prefix, container, containerKind
 			break
 		}
 		if ck := p.d.Containers[p.word(j)]; ck != "" {
+			if p.isProperty(top, n) || p.isCall(top, n) {
+				continue // e.g. angular.module('app'), obj.class
+			}
 			if n+1 < len(top) && p.ts[top[n+1]].Is(".") {
 				break // e.g. module.exports
 			}
@@ -376,30 +407,56 @@ func (p *parser) classify(start, end, body int, prefix, container, containerKind
 	if name == "" || name == "function" || (container == "" && p.d.Skip[name]) {
 		return
 	}
-	qual := name
-	if prefix != "" {
-		qual = prefix + "." + name
+	qual := join(prefix, name)
+	endTok := min(end, len(p.ts)-1)
+	sigEnd := headerEnd
+	if arrowAt >= 0 && !isCont {
+		sigEnd = top[arrowAt]
+	} else if assignAt >= 0 && kind != "type" {
+		sigEnd = top[assignAt]
 	}
+	headerToks := p.ts[start:min(sigEnd, endTok+1)]
+	exported := true
+	if p.d.Exported != nil {
+		exported = p.d.Exported(headerToks, name, container != "")
+	}
+	idx := p.emit(start, end, sigEnd, qual, kind, exported, isCont)
+	if isCont && body >= 0 {
+		closeAt := p.skipGroup(body, len(p.ts)) - 1
+		p.scope(body+1, closeAt, qual, name, kind)
+		return
+	}
+	if p.d.MemberAssign && topLevel && kind == "function" {
+		fb := body
+		if assignAt >= 0 {
+			fb, _ = p.funcLit(top[assignAt]+1, endTok+1)
+		}
+		if fb >= 0 {
+			p.functionBody(idx, fb, qual, name, p.units[name])
+		}
+	}
+}
 
+func join(prefix, name string) string {
+	if prefix == "" {
+		return name
+	}
+	return prefix + "." + name
+}
+
+// emit records a declaration spanning code tokens start..end whose header
+// (signature) is start..sigEnd-1, and returns its index in p.decls.
+func (p *parser) emit(start, end, sigEnd int, qual, kind string, exported, isCont bool) int {
 	// Line span, including directly preceding comments (doc comments).
 	firstAll := p.idx[start]
 	startLine := p.ts[start].Line
 	for a := firstAll - 1; a >= 0 && p.all[a].Kind == Comment && p.all[a].EndLine >= startLine-1; a-- {
 		startLine = p.all[a].Line
 	}
-	endTok := end
-	if endTok >= len(p.ts) {
-		endTok = len(p.ts) - 1
-	}
+	endTok := min(end, len(p.ts)-1)
 	var toks, header []string
 	for j := start; j <= endTok; j++ {
 		toks = append(toks, p.ts[j].Text)
-	}
-	sigEnd := headerEnd
-	if arrowAt >= 0 && !isCont {
-		sigEnd = top[arrowAt]
-	} else if assignAt >= 0 && kind != "type" {
-		sigEnd = top[assignAt]
 	}
 	for j := start; j < sigEnd && j <= endTok; j++ {
 		if j == endTok && (p.ts[j].Is(";") || p.ts[j].Is(",")) {
@@ -408,11 +465,6 @@ func (p *parser) classify(start, end, body int, prefix, container, containerKind
 		header = append(header, p.ts[j].Text)
 	}
 	h := sha1.Sum([]byte(strings.Join(toks, " ")))
-	headerToks := p.ts[start:min(sigEnd, endTok+1)]
-	exported := true
-	if p.d.Exported != nil {
-		exported = p.d.Exported(headerToks, name, container != "")
-	}
 	p.decls = append(p.decls, Decl{
 		Symbol: lang.Symbol{
 			Name: qual, Kind: kind, Start: startLine, End: p.ts[endTok].EndLine,
@@ -421,10 +473,17 @@ func (p *parser) classify(start, end, body int, prefix, container, containerKind
 		},
 		Tokens: toks, Header: header,
 	})
-	if isCont && body >= 0 {
-		closeAt := p.skipGroup(body, len(p.ts)) - 1
-		p.scope(body+1, closeAt, qual, name, kind)
-	}
+	return len(p.decls) - 1
+}
+
+// isProperty reports whether top[n] is accessed as a property (obj.word).
+func (p *parser) isProperty(top []int, n int) bool {
+	return n > 0 && (p.ts[top[n-1]].Is(".") || p.ts[top[n-1]].Is("?."))
+}
+
+// isCall reports whether top[n] is called or dereferenced (word(...), word.x).
+func (p *parser) isCall(top []int, n int) bool {
+	return n+1 < len(top) && (p.ts[top[n+1]].Is("(") || p.ts[top[n+1]].Is("."))
 }
 
 func (p *parser) endTok(end int) int {

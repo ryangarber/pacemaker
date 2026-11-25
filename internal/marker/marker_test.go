@@ -38,3 +38,51 @@ line
 		t.Errorf("expected unclosed problem on line 9, got %+v", probs)
 	}
 }
+
+func TestScanTodos(t *testing.T) {
+	src := `// @pace:file lib/models.dart
+// @pace:todo: port the "fast path" ref=lib/a.dart#Foo.fast owner=ana prio=high tags=perf,api
+x
+// @pace:begin blk lib/a.dart#L1-L5
+  // @pace:todo handle retries
+  # @pace:note "we keep v1 error codes"
+// @pace:end
+/* @pace:todo ref=lib/b.dart block=other */
+// @pace:todo
+// @pace:todo owner=bob
+`
+	s := NewScanner("")
+	blocks, todos, probs := s.ScanAll("f.ts", []byte(src))
+	if len(blocks) != 2 {
+		t.Fatalf("blocks: %+v", blocks)
+	}
+	var file Block
+	for _, b := range blocks {
+		if b.Kind == KindFile {
+			file = b
+		}
+	}
+	if file.ID != "f.ts" || len(file.Refs) != 1 || file.Refs[0].Ref.Path != "lib/models.dart" {
+		t.Errorf("@pace:file <ref> should take the lone argument as the ref: %+v", file)
+	}
+	if len(todos) != 4 {
+		t.Fatalf("want 4 todos, got %d: %+v", len(todos), todos)
+	}
+	a := todos[0]
+	if a.Kind != NoteTodo || a.Text != `port the "fast path"` || a.Owner != "ana" || a.Priority != "high" ||
+		len(a.Tags) != 2 || len(a.Refs) != 1 || a.Refs[0].Ref.Symbol != "Foo.fast" || a.Block != "f.ts" || a.Line != 2 {
+		t.Errorf("bad first todo: %+v", a)
+	}
+	if b := todos[1]; b.Text != "handle retries" || b.Block != "blk" {
+		t.Errorf("todo inside a block should attach to it: %+v", b)
+	}
+	if n := todos[2]; n.Kind != NoteNote || n.Text != "we keep v1 error codes" || n.Block != "blk" {
+		t.Errorf("bad note: %+v", n)
+	}
+	if r := todos[3]; r.Text != "" || len(r.Refs) != 1 || r.Block != "other" || !r.Explicit {
+		t.Errorf("ref-only todo with block=: %+v", r)
+	}
+	if len(probs) != 2 || probs[0].Line != 9 || probs[1].Line != 10 {
+		t.Errorf("empty todos should be problems: %+v", probs)
+	}
+}

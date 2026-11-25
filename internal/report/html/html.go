@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ryangarber/pacemaker/internal/marker"
 	"github.com/ryangarber/pacemaker/internal/model"
 	"github.com/ryangarber/pacemaker/internal/report"
 	"github.com/ryangarber/pacemaker/internal/textutil"
@@ -91,9 +92,15 @@ var funcs = template.FuncMap{
 		}
 		return out
 	},
-	"date":  func(t interface{ Format(string) string }) string { return t.Format("2006-01-02 15:04") },
-	"join":  strings.Join,
-	"plain": func(s string) string { return strings.ReplaceAll(s, "`", "") },
+	"date":   func(t interface{ Format(string) string }) string { return t.Format("2006-01-02 15:04") },
+	"join":   strings.Join,
+	"plain":  func(s string) string { return strings.ReplaceAll(s, "`", "") },
+	"isTodo": func(t *model.Todo) bool { return t.Kind == marker.NoteTodo },
+	"prio":   model.PriorityClass,
+	"review": func(t *model.Todo) bool {
+		return t.Kind == marker.NoteTodo && (t.BlockStatus == model.Drifted || t.BlockStatus == model.Missing)
+	},
+	"bad": func(s model.Status) bool { return s == model.Missing || s == model.Error },
 }
 
 var tmpl = template.Must(template.New("report").Funcs(funcs).Parse(tmplSrc))

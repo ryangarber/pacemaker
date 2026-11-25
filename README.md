@@ -58,11 +58,42 @@ Markers are recognised anywhere on a line, so they work in any comment syntax
 | Marker | Meaning |
 |---|---|
 | `@pace:begin <id> <ref>...` … `@pace:end [id]` | The lines between map to the reference(s). Nestable. |
-| `@pace:file <ref>` | The whole local file maps to the reference (id defaults to the file path). |
-| `@pace:skip <ref> reason="..."` | Upstream code intentionally **not** ported. Counts as *waived* coverage, and is still drift-tracked so you notice if it changes. |
+| `@pace:file <ref>` or `@pace:file <id> <ref>...` | The whole local file maps to the reference(s). With a single argument it is the ref and the id defaults to the file path; with two or more, the first is the id (same order as `@pace:begin`). |
+| `@pace:skip <ref>... reason="..."` | Upstream code intentionally **not** ported. Counts as *waived* coverage, and is still drift-tracked so you notice if it changes. Takes no positional id (use `id=`). |
+| `@pace:todo <text> [ref=…] [prio=…] [owner=…] [tags=…]` | Open work: a known gap, a follow-up, a deviation to fix. Shown in every report. |
+| `@pace:note <text> [ref=…]` | Information for whoever ports the next upstream change: intentional deviations, rationale. Shown in every report; never counts as open work. |
 
 Key/value form is also accepted: `id=`, `ref=` (repeatable for many-to-one mappings),
-`note="..."`, `tags=a,b`, `reason="..."`.
+`note="..."`, `tags=a,b`, `reason="..."`. Positional arguments are always `<id>` first, then `<ref>`s.
+
+### Todos and notes
+
+Porting from a moving target means tracking more than mappings: what's still missing, what you did differently on
+purpose, and which of those notes upstream has since invalidated.
+
+```ts
+// @pace:begin auth.login upstream:lib/src/auth.dart#AuthService.login
+export async function login(user: string, pass: string) {
+  // @pace:todo surface server error messages prio=high owner=ana
+  // @pace:note no offline cache here; the web build always has a network
+}
+// @pace:end
+
+// @pace:todo port token refresh ref=lib/src/auth.dart#AuthService.refresh tags=auth
+```
+
+* Text is free-form; `key=value` attributes may appear anywhere: `ref=` (repeatable), `owner=`, `prio=`
+  (`blocker`, `high`, `normal`, `low`; also `p0`–`p3`, `critical`, …), `tags=a,b`, and `block=<id>` to attach the
+  entry to a block defined elsewhere.
+* An entry inside `@pace:begin`/`@pace:end` (or in a file with `@pace:file`) belongs to that block. When the block
+  **drifts or goes missing upstream**, its todos are flagged *needs review*: the plan may no longer match upstream.
+* `ref=` points at upstream code and is resolved on every run. An entry whose ref no longer resolves is **stale**
+  (the gap may have been closed, renamed or removed upstream). Uncovered upstream symbols referenced by a todo are
+  shown as **planned** in coverage reports, which separates known gaps from ones nobody has noticed.
+* Todos appear in `status`, `show`, `scan`, `coverage --symbols`, `tree`, and every report format (text, Markdown,
+  HTML, JSON). `pacemaker todo` lists and filters them.
+* By default todos never fail `check`. Opt in with `todo.fail_on`, for example
+  `pacemaker config set todo.fail_on blocker,stale`. Accepted values are a priority, `any`, `stale`, and `review`.
 
 ### References
 
@@ -98,10 +129,11 @@ Each link also reports whether the **local** block was edited since the last acc
 | `show GLOB` | Everything about a block: baselines, ranges, findings, commits, diff |
 | `diff [GLOB]` | Upstream changes since accepted, with semantic findings (`--stat`) |
 | `accept [GLOB]` | Record current upstream as baseline (`--all`, `--status`, `--rewrite`, `--dry-run`) |
+| `todo [TEXT\|BLOCK-GLOB]` | List todos (`--notes`, `--only-notes`, `--owner`, `--tag`, `--prio`, `--block`, `--file`, `--review`, `--stale`, `--json`) |
 | `coverage [FILE-GLOB]` | Line + symbol coverage (`--files`, `--symbols`, `--uncovered`) |
 | `tree [SUBDIR]` | Browse target coverage as a directory tree (`--depth`, `--gaps`) |
 | `report` | Render a report: `-o report.html`, `--format md\|html\|json\|text` |
-| `check` | CI gate; exits 1 on marker problems or statuses in `drift.fail_on` |
+| `check` | CI gate; exits 1 on marker problems, statuses in `drift.fail_on`, or todos matching `todo.fail_on` |
 | `scan` | List markers without touching targets |
 | `prune` | Drop state for blocks/refs that no longer exist |
 | `fetch [TARGET]` | Clone/update remote targets (also happens automatically on first use; `--offline` disables) |
@@ -144,6 +176,8 @@ drift:
   fail_on: [drifted, missing, new, error]
   context: 3
   max_commits: 10
+todo:
+  fail_on: []               # any | blocker | high | normal | low | stale | review
 report:
   format: markdown
 ```
@@ -196,8 +230,42 @@ A module implements `lang.Language` (`ID`, `Extensions`) and opts into any capab
 |---|---|
 | `Normalizer` | `cosmetic` classification (Dart/JS ignore comments, whitespace, trailing commas, quote style; JS also semicolons) |
 | `LineClassifier` | Coverage counts only code lines (not comments) |
-| `SymbolProvider` | `#Symbol` refs, symbol coverage, rename guesses |
+| `SymbolProvider` | `#Symbol` refs, symbol coverage, rename guesses (see [JavaScript symbols](#javascript-symbols)) |
 | `SemanticDiffer` | Findings: signature changes, removed/renamed/added members, visibility changes, import changes — with severities |
+
+#### JavaScript symbols
+
+Besides `class`/`function`/`const` declarations, the JavaScript/TypeScript module recognises symbols declared by
+assignment and registration, so AngularJS 1.x, ES5, and CommonJS code can be referenced by symbol:
+
+```js
+(function () {                                            // IIFE bodies are parsed as top level
+  angular.module('app')
+    .controller('LoginCtrl', ['$scope', function ($scope) { // #LoginCtrl            (controller)
+      $scope.login = function (name) { ... };              // #LoginCtrl.$scope.login
+    }])
+    .factory('Auth', function ($http) {                    // #Auth                 (factory)
+      return { check: check, ping: function () {} };       // #Auth.check, #Auth.ping
+      function check() { ... }
+    });
+
+  angular.module('app').controller('ProfileCtrl', ProfileCtrl);
+  function ProfileCtrl() {                                 // #ProfileCtrl          (controller)
+    var vm = this;
+    vm.reset = function () { ... };                        // #ProfileCtrl.reset
+    vm.save = save;                                        //  exposes ↓
+    function save() { ... }                                // #ProfileCtrl.save     (exported)
+  }
+})();
+Store.prototype.add = function (x) { ... };               // #Store.add
+exports.makeStore = function () { ... };                   // #makeStore
+```
+
+Recognised registrations are `controller`, `service`, `factory`, `provider`, `directive`, `component`
+(including its object's `controller`), `filter`, `decorator`, `animation`, `constant`, and `value`.
+`$scope.x`/`$rootScope.x` members are found in any function body. `this.x` members (and aliases such as
+`var vm = this`), inner functions, and returned object literals are found in registered units and in
+Capitalized (constructor-style) functions. Suffixes resolve too, so `#$scope.login` works when it is unique.
 
 Adding a language: create a package that calls `lang.Register(YourModule{})` in `init()`, and blank-import it in
 `main.go`. C-family languages can reuse `clike` by supplying a `Dialect` (see `lang/dart`).

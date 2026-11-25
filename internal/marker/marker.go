@@ -9,9 +9,16 @@
 //
 //	# @pace:file id=models ref=lib/models.dart          (whole local file)
 //	<!-- @pace:skip ref=lib/legacy.dart reason="not needed on web" -->
+//	// @pace:todo handle token refresh ref=lib/auth.dart#refresh owner=ana prio=high
+//	// @pace:note we keep the v1 error codes on purpose
 //
 // Positional form is "<id> <ref>..."; key/value form accepts id=, ref= (may
-// repeat), note=, tags= and reason=. Quoted values may contain spaces.
+// repeat), note=, tags= and reason=. Quoted values may contain spaces. A
+// @pace:file marker with a single positional argument treats it as the ref.
+//
+// @pace:todo and @pace:note take free text plus optional ref=, owner=,
+// prio=, tags= and block= attributes; they attach to the innermost enclosing
+// block (or the file's @pace:file block) unless block= names another one.
 package marker
 
 import (
@@ -54,6 +61,31 @@ type Block struct {
 	MarkerLine int
 }
 
+// NoteKind distinguishes open work from informational notes.
+type NoteKind string
+
+const (
+	NoteTodo NoteKind = "todo" // open work: a gap, a follow-up, a known deviation to fix
+	NoteNote NoteKind = "note" // informational: intentional deviation, porting rationale
+)
+
+// Todo is a free-text annotation from @pace:todo or @pace:note.
+type Todo struct {
+	Kind     NoteKind
+	File     string
+	Line     int
+	Text     string
+	Owner    string
+	Priority string
+	Tags     []string
+	Refs     []RefSite
+	// Block is the id of the block the note belongs to: the innermost
+	// enclosing @pace:begin, the file's @pace:file block, or block=.
+	Block string
+	// Explicit is true when Block came from block= (and must exist).
+	Explicit bool
+}
+
 // Problem is a malformed or inconsistent marker.
 type Problem struct {
 	File    string `json:"file"`
@@ -75,7 +107,7 @@ func NewScanner(token string) *Scanner {
 		token = "@pace"
 	}
 	return &Scanner{
-		re:    regexp.MustCompile(regexp.QuoteMeta(token) + `:(begin|end|file|skip)\b(.*)$`),
+		re:    regexp.MustCompile(regexp.QuoteMeta(token) + `:(begin|end|file|skip|todo|note)\b(.*)$`),
 		token: []byte(token + ":"),
 	}
 }
@@ -92,10 +124,18 @@ type open struct {
 
 // Scan extracts blocks from a single file's content.
 func (s *Scanner) Scan(file string, content []byte) ([]Block, []Problem) {
+	blocks, _, problems := s.ScanAll(file, content)
+	return blocks, problems
+}
+
+// ScanAll extracts blocks and todo/note annotations from a file's content.
+func (s *Scanner) ScanAll(file string, content []byte) ([]Block, []Todo, []Problem) {
 	var (
 		blocks   []Block
+		todos    []Todo
 		problems []Problem
 		stack    []open
+		fileID   string // id of this file's @pace:file block, if any
 	)
 	lines := strings.Split(string(content), "\n")
 	nLines := len(lines)
@@ -114,6 +154,20 @@ func (s *Scanner) Scan(file string, content []byte) ([]Block, []Problem) {
 		verb, rest := m[1], strings.TrimSpace(m[2])
 		for _, c := range closers {
 			rest = strings.TrimSpace(strings.TrimSuffix(rest, c))
+		}
+		if verb == "todo" || verb == "note" {
+			t, errs := parseTodo(NoteKind(verb), file, ln, rest)
+			for _, e := range errs {
+				prob(ln, "%s", e)
+			}
+			if t == nil {
+				continue
+			}
+			if t.Block == "" && len(stack) > 0 {
+				t.Block = stack[len(stack)-1].b.ID
+			}
+			todos = append(todos, *t)
+			continue
 		}
 		pos, kv, err := tokenize(rest)
 		if err != nil {
@@ -156,7 +210,10 @@ func (s *Scanner) Scan(file string, content []byte) ([]Block, []Problem) {
 		}
 		b.ID = kv["id"]
 		rawRefs := kv["ref"+multiSep]
-		if b.ID == "" && len(pos) > 0 && b.Kind != KindSkip {
+		// "@pace:file <ref>": a lone positional argument is the reference
+		// (the id then defaults to the local path).
+		singleFileRef := b.Kind == KindFile && b.ID == "" && rawRefs == "" && len(pos) == 1
+		if b.ID == "" && len(pos) > 0 && b.Kind != KindSkip && !singleFileRef {
 			b.ID, pos = pos[0], pos[1:]
 		}
 		refs := append(strings.Split(rawRefs, multiSep), pos...)
@@ -204,13 +261,82 @@ func (s *Scanner) Scan(file string, content []byte) ([]Block, []Problem) {
 		if b.Kind == KindBlock {
 			stack = append(stack, open{b: b, line: ln})
 		} else {
+			if b.Kind == KindFile && fileID == "" {
+				fileID = b.ID
+			}
 			blocks = append(blocks, *b)
 		}
 	}
 	for _, o := range stack {
 		prob(o.line, "@pace:begin %q is never closed", o.b.ID)
 	}
-	return blocks, problems
+	for i := range todos {
+		if todos[i].Block == "" {
+			todos[i].Block = fileID
+		}
+	}
+	return blocks, todos, problems
+}
+
+// todoAttr matches the recognised key=value attributes of todo/note markers;
+// everything else is free text.
+var todoAttr = regexp.MustCompile(`(?:^|\s)(ref|src|owner|prio|priority|tags|block)=("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)`)
+
+func unquote(v string) string {
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		v = v[1 : len(v)-1]
+		var b strings.Builder
+		for i := 0; i < len(v); i++ {
+			if v[i] == '\\' && i+1 < len(v) {
+				i++
+			}
+			b.WriteByte(v[i])
+		}
+		return b.String()
+	}
+	return v
+}
+
+// parseTodo parses the text after "@pace:todo" / "@pace:note".
+func parseTodo(kind NoteKind, file string, line int, rest string) (*Todo, []string) {
+	t := &Todo{Kind: kind, File: file, Line: line}
+	var errs []string
+	for _, m := range todoAttr.FindAllStringSubmatch(rest, -1) {
+		val := unquote(m[2])
+		switch m[1] {
+		case "ref", "src":
+			r, err := ref.Parse(val)
+			if err != nil {
+				errs = append(errs, fmt.Sprintf("bad reference %q: %v", val, err))
+				continue
+			}
+			t.Refs = append(t.Refs, RefSite{Ref: r, Raw: val, Line: line})
+		case "owner":
+			t.Owner = val
+		case "prio", "priority":
+			t.Priority = strings.ToLower(val)
+		case "tags":
+			for _, tag := range strings.Split(val, ",") {
+				if tag = strings.TrimSpace(tag); tag != "" {
+					t.Tags = append(t.Tags, tag)
+				}
+			}
+		case "block":
+			t.Block, t.Explicit = val, true
+		}
+	}
+	text := strings.TrimSpace(todoAttr.ReplaceAllString(rest, " "))
+	text = strings.TrimSpace(strings.TrimLeft(text, ":-–— "))
+	if len(text) >= 2 && strings.Count(text, text[:1]) == 2 {
+		text = unquote(text) // "quoted text" → quoted text
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	t.Text = text
+	if t.Text == "" && len(t.Refs) == 0 {
+		errs = append(errs, fmt.Sprintf("@pace:%s needs a description or a ref=", kind))
+		return nil, errs
+	}
+	return t, errs
 }
 
 const multiSep = "\x00"

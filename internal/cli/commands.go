@@ -30,6 +30,9 @@ Annotate local code with markers inside any comment syntax:
   # @pace:file lib/models.dart                      (whole local file)
   /* @pace:skip ref=lib/legacy.dart reason="n/a" */ (intentionally not ported)
 
+  // @pace:todo port retry backoff ref=lib/http.dart#Client.retry prio=high owner=ana
+  // @pace:note error codes intentionally kept at v1  (shown in reports)
+
 References: [target:]path[#L10-L42 | #Symbol.name]. Symbols are resolved by
 language modules (see ` + "`pacemaker modules`" + `).`
 
@@ -40,7 +43,7 @@ func rootCommand() *Command {
 		Long:  markerHelp,
 		Sub: []*Command{
 			initCmd(), fetchCmd(), statusCmd(), lsCmd(), showCmd(), diffCmd(), acceptCmd(),
-			coverageCmd(), treeCmd(), reportCmd(), checkCmd(), scanCmd(), pruneCmd(),
+			todoCmd(), coverageCmd(), treeCmd(), reportCmd(), checkCmd(), scanCmd(), pruneCmd(),
 			configCmd(), targetCmd(), filterCmd(), modulesCmd(), versionCmd(),
 		},
 	}
@@ -177,6 +180,12 @@ func hints(c *Ctx, r *model.Report) {
 	}
 	if r.Counts[model.Cosmetic] > 0 {
 		h = append(h, "cosmetic changes can be accepted with `pacemaker accept --status cosmetic`")
+	}
+	if r.TodoStats.NeedsReview > 0 {
+		h = append(h, "some todos sit in blocks that changed upstream: `pacemaker todo --review`")
+	}
+	if r.TodoStats.Stale > 0 {
+		h = append(h, "some todo/note refs no longer resolve upstream: `pacemaker todo --stale`")
 	}
 	if len(h) == 0 && len(r.Problems) == 0 {
 		fmt.Fprintf(c.Out, "\n%s\n", c.P.S("✓ everything is in step with upstream", tu.Green))
@@ -449,7 +458,27 @@ func scanCmd() *Command {
 				t.Add(c.P.S(b.ID, tu.Bold), string(b.Kind), c.P.S(loc, tu.Gray), strings.Join(refs, ", "))
 			}
 			t.Render(c.Out, c.P)
+			todos, _ := e.Todos()
+			if len(todos) > 0 {
+				fmt.Fprintln(c.Out)
+				tt := tu.Table{Header: []string{"", "WHERE", "BLOCK", "TEXT"}}
+				for _, td := range todos {
+					icon := c.P.S("☐", tu.Magenta)
+					if td.Kind == "note" {
+						icon = c.P.S("ℹ", tu.Gray)
+					}
+					txt := td.Text
+					for _, r := range td.Refs {
+						txt += c.P.S(" → "+r.Ref.String(), tu.Gray)
+					}
+					tt.Add(icon, c.P.S(fmt.Sprintf("%s:%d", td.File, td.Line), tu.Gray), td.Block, txt)
+				}
+				tt.Render(c.Out, c.P)
+			}
 			fmt.Fprintf(c.Out, "\n%d block(s)", len(blocks))
+			if len(todos) > 0 {
+				fmt.Fprintf(c.Out, ", %d todo/note(s)", len(todos))
+			}
 			if len(probs) > 0 {
 				fmt.Fprintf(c.Out, ", %s\n", c.P.S(fmt.Sprintf("%d problem(s)", len(probs)), tu.Red))
 				for _, p := range probs {
@@ -458,6 +487,97 @@ func scanCmd() *Command {
 				return ExitError{1}
 			}
 			fmt.Fprintln(c.Out)
+			return nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------- todo
+
+func todoCmd() *Command {
+	var owners, tags, prios, blocks, files multi
+	var review, stale, notes, onlyNotes, asJSON bool
+	return &Command{
+		Name: "todo", Aliases: []string{"todos"}, Args: "[TEXT-OR-BLOCK-GLOB...]",
+		Short: "list @pace:todo gaps and @pace:note annotations",
+		Long: `Lists @pace:todo (open work) and, with --notes, @pace:note annotations.
+
+Each todo shows the status of the block it belongs to: a todo inside a block
+whose upstream drifted may be obsolete or need re-planning (--review). Todos
+with ref= are checked against the current upstream; --stale lists those whose
+referenced file/symbol/lines are gone. Uncovered upstream symbols referenced
+by a todo show as "planned" in coverage reports.`,
+		Flags: func(fs *flag.FlagSet) {
+			fs.Var(&owners, "owner", "filter by owner")
+			fs.Var(&tags, "tag", "filter by tag")
+			fs.Var(&prios, "prio", "filter by priority (blocker,high,normal,low)")
+			fs.Var(&blocks, "block", "filter by block id glob")
+			fs.Var(&files, "file", "filter by local file glob")
+			fs.BoolVar(&review, "review", false, "only todos whose block drifted/went missing upstream")
+			fs.BoolVar(&stale, "stale", false, "only entries whose upstream ref no longer resolves")
+			fs.BoolVar(&notes, "notes", false, "include @pace:note entries")
+			fs.BoolVar(&onlyNotes, "only-notes", false, "only @pace:note entries")
+			fs.BoolVar(&asJSON, "json", false, "output JSON")
+		},
+		Run: func(c *Ctx, _ *flag.FlagSet, args []string) error {
+			_, r, err := analyze(c, engine.Options{})
+			if err != nil {
+				return err
+			}
+			match := func(pats []string, vals ...string) bool {
+				if len(pats) == 0 {
+					return true
+				}
+				for _, p := range pats {
+					for _, v := range vals {
+						if globMatch(p, v) || strings.EqualFold(p, v) {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			var out []*model.Todo
+			for _, t := range r.Todos {
+				isNote := t.Kind == "note"
+				if (isNote && !notes && !onlyNotes && !stale) || (!isNote && onlyNotes) {
+					continue
+				}
+				var prioVals []string
+				if !isNote {
+					prioVals = []string{t.Priority, model.PriorityClass(t.Priority)}
+				}
+				ok := match(owners, t.Owner) && match(tags, t.Tags...) && match(prios, prioVals...) &&
+					match(blocks, t.Block) && match(files, t.File) &&
+					(!review || (!isNote && t.NeedsReview())) && (!stale || t.Stale())
+				if ok && len(args) > 0 {
+					ok = false
+					for _, a := range args {
+						if globMatch(a, t.Block) || strings.Contains(strings.ToLower(t.Text), strings.ToLower(a)) {
+							ok = true
+						}
+					}
+				}
+				if ok {
+					out = append(out, t)
+				}
+			}
+			if asJSON {
+				enc := json.NewEncoder(c.Out)
+				enc.SetIndent("", "  ")
+				if out == nil {
+					out = []*model.Todo{}
+				}
+				return enc.Encode(out)
+			}
+			if len(out) == 0 {
+				fmt.Fprintln(c.Out, c.P.S("no matching todos", tu.Gray))
+				return nil
+			}
+			text.TodoTable(c.Out, c.P, out)
+			if line := text.TodoSummary(c.P, r.TodoStats); line != "" {
+				fmt.Fprintf(c.Out, "\n%s  %s\n", c.P.S("total", tu.Bold), line)
+			}
 			return nil
 		},
 	}
@@ -533,6 +653,9 @@ func printGaps(c *Ctx, t model.TargetReport, symbols, ranges bool) {
 				exp := ""
 				if !s.Exported {
 					exp = c.P.S(" private", tu.Gray)
+				}
+				if s.Planned {
+					exp += c.P.S(" ☐ planned", tu.Magenta)
 				}
 				lines = append(lines, fmt.Sprintf("    %s %s %s%s %s", st, s.Name, c.P.S(s.Kind, tu.Gray), exp, c.P.S(fmt.Sprintf("L%d-L%d", s.Start, s.End), tu.Gray)))
 			}
@@ -655,6 +778,9 @@ func printTree(c *Ctx, n *dirNode, indent string, level, maxDepth int, hideFull 
 			if n := countUnported(ch.file); n > 0 {
 				extra += c.P.S(fmt.Sprintf(" %d unported symbol(s)", n), tu.Yellow)
 			}
+			if ch.file.Todos > 0 {
+				extra += c.P.S(fmt.Sprintf(" ☐%d", ch.file.Todos), tu.Magenta)
+			}
 		}
 		fmt.Fprintf(c.Out, "%s%s%s %s %s%s\n", c.P.S(indent+branch, tu.Gray), tu.Pad(label, 0), "", c.P.Percent(pct), tu.Bar(c.P, pct, 0, 10), extra)
 		if ch.file == nil && (maxDepth <= 0 || level < maxDepth) {
@@ -753,7 +879,8 @@ func checkCmd() *Command {
 		Name: "check", Short: "CI gate: exit 1 if anything needs attention",
 		Long: `Exits 1 when marker problems exist or any link has a status listed in
 drift.fail_on (default: drifted, missing, new, error; cosmetic when
-drift.cosmetic=fail). Optionally writes a report as well.`,
+drift.cosmetic=fail), or when todos match todo.fail_on (default: none; e.g.
+blocker, review, stale). Optionally writes a report as well.`,
 		Flags: func(fs *flag.FlagSet) {
 			fs.StringVar(&format, "format", "", "also render a report in this format")
 			fs.StringVar(&out, "o", "", "report output file")
@@ -781,7 +908,7 @@ drift.cosmetic=fail). Optionally writes a report as well.`,
 				text.LinkTable(c.Out, c.P, links)
 			}
 			if r.Failing {
-				fmt.Fprintf(c.Out, "\n%s\n", c.P.S("✗ check failed", tu.Red, tu.Bold))
+				fmt.Fprintf(c.Out, "\n%s %s\n", c.P.S("✗ check failed:", tu.Red, tu.Bold), strings.Join(r.FailReasons, "; "))
 			} else {
 				fmt.Fprintf(c.Out, "\n%s\n", c.P.S("✓ check passed", tu.Green, tu.Bold))
 			}

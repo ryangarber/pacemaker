@@ -32,6 +32,8 @@ details.link>summary::-webkit-details-marker{display:none}details.link .body{pad
 pre.diff{background:var(--bg);border:1px solid var(--line);border-radius:6px;overflow:auto;padding:6px 0;margin:8px 0}
 pre.diff span{display:block;padding:0 10px;white-space:pre}.diff .add{background:var(--add-bg)}.diff .del{background:var(--del-bg)}.diff .hunk{background:var(--hunk);color:var(--muted)}.diff .hdr{font-weight:600}
 .tag{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:0 8px;font-size:11px;color:var(--muted)}
+.s-todo{color:var(--new)}.p-blocker{color:var(--bad);font-weight:600}.p-high{color:var(--warn);font-weight:600}.p-normal{color:var(--info)}.p-low{color:var(--muted)}
+ul.todos{list-style:none;padding:0;margin:8px 0}ul.todos li{margin:4px 0}
 .problems li{margin:4px 0}.hidden{display:none!important}
 footer{margin:40px 0 10px;color:var(--muted);font-size:12px}
 </style>
@@ -39,11 +41,13 @@ footer{margin:40px 0 10px;color:var(--muted);font-size:12px}
 <body><main>
 <h1>{{.Title}}</h1>
 <div>{{if .Failing}}<span class="verdict bad">Needs attention</span>{{else}}<span class="verdict ok">In sync</span>{{end}}<span class="muted">Generated {{date .Generated}}</span></div>
+{{if .FailReasons}}<div class="muted" style="margin-top:6px">Failing because of: {{join .FailReasons "; "}}</div>{{end}}
 
 <div class="cards" id="filters">
 {{range .Statuses}}{{$n := index $.Counts .}}{{if $n}}<div class="card" data-status="{{.}}"><div class="n s-{{.}}">{{icon .}} {{$n}}</div><div class="l">{{.}}</div></div>{{end}}{{end}}
 {{if .Total.Files}}<div class="card" style="cursor:default"><div class="n">{{pct .Total.Percent}}%</div><div class="l">line coverage</div></div>{{end}}
 {{if .Total.Symbols}}<div class="card" style="cursor:default"><div class="n">{{pct .Total.SymbolPercent}}%</div><div class="l">symbol coverage</div></div>{{end}}
+{{if .TodoStats.Open}}<a class="card" href="#todos" style="text-decoration:none;color:inherit"><div class="n s-todo">☐ {{.TodoStats.Open}}</div><div class="l">open todos{{if .TodoStats.NeedsReview}} · {{.TodoStats.NeedsReview}} to re-check{{end}}</div></a>{{end}}
 </div>
 
 <h2>Targets</h2>
@@ -61,7 +65,7 @@ footer{margin:40px 0 10px;color:var(--muted);font-size:12px}
 {{if .Links}}<h2>Links</h2>
 {{range .Links}}<details class="link" data-status="{{.Status}}"{{if or (eq .Status "drifted") (eq .Status "missing")}} open{{end}}>
 <summary><strong class="s-{{.Status}}">{{icon .Status}} {{.Status}}</strong> <code><b>{{.Block}}</b></code> <span class="muted">→</span> <code>{{.Ref}}</code>
-{{if .LocalChanged}}<span class="tag">local edited</span>{{end}}{{range .Tags}}<span class="tag">{{.}}</span>{{end}}
+{{if .LocalChanged}}<span class="tag">local edited</span>{{end}}{{with .OpenTodos}}<span class="tag s-todo">☐ {{.}} todo</span>{{end}}{{range .Tags}}<span class="tag">{{.}}</span>{{end}}
 <span class="muted" style="margin-left:auto">{{.LocalFile}}:{{.MarkerLine}}</span></summary>
 <div class="body">
 <dl class="kv">
@@ -72,16 +76,26 @@ footer{margin:40px 0 10px;color:var(--muted);font-size:12px}
 {{if .Range.Start}}<dt>Now</dt><dd><code>{{short .Revision}}</code> <code>{{.Current}}</code> {{.Range}}</dd>{{end}}
 {{if or .Added .Removed}}<dt>Change</dt><dd><span class="s-ok">+{{.Added}}</span> <span class="s-missing">−{{.Removed}}</span> lines</dd>{{end}}
 {{if .SuggestedRef}}<dt>Suggested ref</dt><dd><code>{{.SuggestedRef}}</code></dd>{{end}}
+{{if .Todos}}<dt>Todos &amp; notes</dt><dd><ul class="todos">{{range .Todos}}<li>{{template "todo" .}}</li>{{end}}</ul></dd>{{end}}
 </dl>
 {{if .Findings}}<div class="muted">Semantic changes ({{.Language}})</div><table><tbody>{{range .Findings}}<tr><td style="width:90px"><span class="sev sev-{{.Severity}}">{{.Severity}}</span></td><td style="width:150px" class="muted">{{.Kind}}</td><td>{{if .Symbol}}<code>{{.Symbol}}</code> {{end}}{{plain .Message}}</td></tr>{{end}}</tbody></table>{{end}}
 {{if .Commits}}<div class="muted">Upstream commits since accept</div><table><tbody>{{range .Commits}}<tr><td style="width:100px"><code>{{.Short}}</code></td><td style="width:100px" class="muted">{{.Date}}</td><td>{{.Subject}} <span class="muted">— {{.Author}}</span></td></tr>{{end}}</tbody></table>{{end}}
 {{if and $.Opts.Diffs .Diff}}<pre class="diff mono">{{range diffLines .Diff}}<span class="{{.Class}}">{{.Text}}</span>{{end}}</pre>{{end}}
 </div></details>{{end}}{{end}}
 
+{{if .Todos}}<h2 id="todos">Todos &amp; notes</h2>
+<table><thead><tr><th></th><th>Priority</th><th>Where</th><th>Block</th><th>Text</th></tr></thead><tbody>
+{{range .Todos}}<tr><td>{{if isTodo .}}<span class="s-todo">☐</span>{{else}}<span class="muted">ℹ</span>{{end}}</td>
+<td>{{if isTodo .}}<span class="p-{{prio .Priority}}">{{prio .Priority}}</span>{{end}}</td>
+<td class="mono">{{.File}}:{{.Line}}</td>
+<td>{{if .Block}}{{if .BlockStatus}}<span class="s-{{.BlockStatus}}">{{icon .BlockStatus}}</span> {{end}}<code>{{.Block}}</code>{{end}}</td>
+<td>{{template "todo" .}}</td></tr>{{end}}
+</tbody></table>{{end}}
+
 {{if .Opts.Files}}{{range .Targets}}{{if .Files}}<h2>Coverage · <code>{{.Name}}</code></h2>
 <table><thead><tr><th>File</th><th>Coverage</th><th class="num">Lines</th><th class="num">Links</th></tr></thead><tbody>
 {{range worstFirst .Files}}{{$w := waivedPct .Waived .Significant}}<tr><td><code>{{.Path}}</code>
-{{if $.Opts.Symbols}}{{with unported .}}<details><summary class="muted">{{len .}} unported symbol(s)</summary><table><tbody>{{range .}}<tr><td><code>{{.Name}}</code></td><td class="muted">{{.Kind}}</td><td>{{.State}}</td><td class="muted">L{{.Start}}-L{{.End}}</td></tr>{{end}}</tbody></table></details>{{end}}{{end}}</td>
+{{if $.Opts.Symbols}}{{with unported .}}<details><summary class="muted">{{len .}} unported symbol(s)</summary><table><tbody>{{range .}}<tr><td><code>{{.Name}}</code></td><td class="muted">{{.Kind}}</td><td>{{.State}}{{if .Planned}} <span class="tag s-todo">☐ planned</span>{{end}}</td><td class="muted">L{{.Start}}-L{{.End}}</td></tr>{{end}}</tbody></table></details>{{end}}{{end}}</td>
 <td><span class="bar"><i class="{{tone .Percent}}" style="width:{{sub .Percent $w}}%"></i><i class="waive" style="width:{{$w}}%"></i></span>{{pct .Percent}}%</td>
 <td class="num">{{.Covered}}{{if .Waived}}+{{.Waived}}{{end}}/{{.Significant}}</td><td class="num">{{.Links}}</td></tr>{{end}}
 </tbody></table>{{end}}{{end}}{{end}}
@@ -93,3 +107,6 @@ footer{margin:40px 0 10px;color:var(--muted);font-size:12px}
 document.querySelectorAll('details.link').forEach(function(d){d.classList.toggle('hidden',!!off[d.dataset.status])});});});})();
 </script>
 </body></html>
+{{define "todo"}}{{.Text}}{{if .Owner}} <span class="tag">@{{.Owner}}</span>{{end}}{{range .Tags}} <span class="tag">#{{.}}</span>{{end}}
+{{range .Refs}}{{if bad .Status}} <span class="s-error">✗ <code>{{.Ref}}</code> {{.Status}}: {{.Detail}}</span>{{else}} <span class="muted">→ <code>{{.Ref}}</code></span>{{end}}{{end}}
+{{if review .}} <span class="s-drifted">⟳ block {{.BlockStatus}} upstream — re-check</span>{{end}}{{end}}

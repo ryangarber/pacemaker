@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/ryangarber/pacemaker/internal/marker"
 	"github.com/ryangarber/pacemaker/internal/model"
 	"github.com/ryangarber/pacemaker/internal/report"
 	tu "github.com/ryangarber/pacemaker/internal/textutil"
@@ -36,6 +37,10 @@ func (Renderer) Render(w io.Writer, r *model.Report, o report.Options) error {
 		}
 		fmt.Fprintln(w)
 		LinkDetail(w, p, l, o.Diffs)
+	}
+	if len(r.Todos) > 0 {
+		fmt.Fprintln(w)
+		TodoTable(w, p, r.Todos)
 	}
 	if o.Files {
 		for _, t := range r.Targets {
@@ -80,6 +85,9 @@ func Summary(w io.Writer, p tu.Painter, r *model.Report) {
 		}
 		fmt.Fprintln(w, line)
 	}
+	if line := TodoSummary(p, r.TodoStats); line != "" {
+		fmt.Fprintf(w, "%s  %s\n", p.S("todos", tu.Bold), line)
+	}
 	if len(r.Problems) > 0 {
 		fmt.Fprintf(w, "%s\n", p.S(fmt.Sprintf("%d marker problem(s):", len(r.Problems)), tu.Red, tu.Bold))
 		for _, pr := range r.Problems {
@@ -100,6 +108,9 @@ func LinkTable(w io.Writer, p tu.Painter, links []*model.Link) {
 		detail := tu.Truncate(l.Detail, 60)
 		if l.LocalChanged {
 			detail = p.S("✎ ", tu.Yellow) + detail
+		}
+		if n := l.OpenTodos(); n > 0 {
+			detail = p.S(fmt.Sprintf("☐%d ", n), tu.Magenta) + detail
 		}
 		if sev := l.MaxSeverity(); sev != "" {
 			detail = p.S("["+string(sev)+"] ", sevStyle(sev)) + detail
@@ -170,6 +181,12 @@ func LinkDetail(w io.Writer, p tu.Painter, l *model.Link, diffs bool) {
 			fmt.Fprintf(w, "    %s %s %s %s\n", p.S(c.Short, tu.Yellow), p.S(c.Date, tu.Gray), c.Subject, p.S("— "+c.Author, tu.Gray))
 		}
 	}
+	if len(l.Todos) > 0 {
+		fmt.Fprintf(w, "  %s\n", p.S("todos & notes:", tu.Gray))
+		for _, t := range l.Todos {
+			fmt.Fprintf(w, "    %s %s\n", todoIcon(p, t), todoLine(p, t))
+		}
+	}
 	if diffs && l.Diff != "" {
 		fmt.Fprintln(w)
 		for _, line := range strings.Split(strings.TrimSuffix(p.Diff(l.Diff), "\n"), "\n") {
@@ -193,4 +210,116 @@ func FileTable(w io.Writer, p tu.Painter, t model.TargetReport, limit int) {
 			fmt.Sprintf("%d/%d", f.Covered+f.Waived, f.Significant), fmt.Sprint(f.Links))
 	}
 	tb.Render(w, p)
+}
+
+// TodoSummary renders todo counts on one line ("" when there are none).
+func TodoSummary(p tu.Painter, c model.TodoCounts) string {
+	if c.Open+c.Notes == 0 {
+		return ""
+	}
+	var parts []string
+	if c.Open > 0 {
+		s := fmt.Sprintf("☐ %d open", c.Open)
+		var prios []string
+		for _, pr := range model.Priorities {
+			if n := c.ByPriority[pr]; n > 0 && pr != "normal" {
+				prios = append(prios, fmt.Sprintf("%d %s", n, pr))
+			}
+		}
+		if len(prios) > 0 {
+			s += " (" + strings.Join(prios, ", ") + ")"
+		}
+		parts = append(parts, p.S(s, tu.Magenta))
+	}
+	if c.NeedsReview > 0 {
+		parts = append(parts, p.S(fmt.Sprintf("⟳ %d need review (upstream changed)", c.NeedsReview), tu.Yellow))
+	}
+	if c.Stale > 0 {
+		parts = append(parts, p.S(fmt.Sprintf("✗ %d stale ref(s)", c.Stale), tu.Red))
+	}
+	if c.Notes > 0 {
+		parts = append(parts, p.S(fmt.Sprintf("ℹ %d note(s)", c.Notes), tu.Gray))
+	}
+	return strings.Join(parts, p.S("  ·  ", tu.Gray))
+}
+
+func todoIcon(p tu.Painter, t *model.Todo) string {
+	if t.Kind == marker.NoteNote {
+		return p.S("ℹ", tu.Gray)
+	}
+	return p.S("☐", tu.Magenta)
+}
+
+func prioStyle(prio string) tu.Style {
+	switch model.PriorityClass(prio) {
+	case "blocker":
+		return tu.Red
+	case "high":
+		return tu.Yellow
+	case "low":
+		return tu.Gray
+	}
+	return tu.Blue
+}
+
+// todoLine renders a todo's text with its flags (without the location).
+func todoLine(p tu.Painter, t *model.Todo) string {
+	s := t.Text
+	if t.Priority != "" {
+		s = p.S("["+t.Priority+"] ", prioStyle(t.Priority)) + s
+	}
+	if t.Owner != "" {
+		s += p.S(" @"+t.Owner, tu.Cyan)
+	}
+	if len(t.Tags) > 0 {
+		s += p.S(" #"+strings.Join(t.Tags, " #"), tu.Gray)
+	}
+	for _, r := range t.Refs {
+		switch r.Status {
+		case model.OK, "":
+			s += p.S(" → "+r.Ref, tu.Gray)
+		default:
+			s += p.S(" → "+r.Ref+" ("+string(r.Status)+": "+r.Detail+")", tu.Red)
+		}
+	}
+	switch t.BlockStatus {
+	case model.Drifted, model.Missing:
+		s += p.S(" ⟳ block "+string(t.BlockStatus)+" upstream — re-check", tu.Yellow)
+	}
+	return s
+}
+
+// TodoTable lists todos and notes.
+func TodoTable(w io.Writer, p tu.Painter, todos []*model.Todo) {
+	t := tu.Table{Header: []string{"", "PRIO", "WHERE", "BLOCK", "TEXT"}}
+	for _, td := range todos {
+		blk := td.Block
+		if blk != "" && td.BlockStatus != "" {
+			icon, c := tu.StatusIcon(td.BlockStatus)
+			blk = p.S(icon, c) + " " + blk
+		}
+		prio := ""
+		if td.Kind == marker.NoteTodo {
+			prio = p.S(model.PriorityClass(td.Priority), prioStyle(td.Priority))
+		}
+		text := td.Text
+		if td.Owner != "" {
+			text += p.S(" @"+td.Owner, tu.Cyan)
+		}
+		if len(td.Tags) > 0 {
+			text += p.S(" #"+strings.Join(td.Tags, " #"), tu.Gray)
+		}
+		for _, r := range td.Refs {
+			if r.Status == model.Missing || r.Status == model.Error {
+				text += p.S(" ✗ "+r.Ref+" "+string(r.Status), tu.Red)
+			} else {
+				text += p.S(" → "+r.Ref, tu.Gray)
+			}
+		}
+		if td.Kind == marker.NoteTodo && (td.BlockStatus == model.Drifted || td.BlockStatus == model.Missing) {
+			text += p.S(" ⟳ re-check: block "+string(td.BlockStatus), tu.Yellow)
+		}
+		t.Add(todoIcon(p, td), prio, p.S(fmt.Sprintf("%s:%d", td.File, td.Line), tu.Gray), blk, text)
+	}
+	t.Render(w, p)
 }

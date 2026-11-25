@@ -10,7 +10,7 @@ import (
 )
 
 // coverage computes line and symbol coverage for one target.
-func (e *Engine) coverage(name string, links []*model.Link) model.TargetReport {
+func (e *Engine) coverage(name string, links []*model.Link, todos []*model.Todo) model.TargetReport {
 	tr := e.targetHeader(name)
 	if tr.Error != "" {
 		return tr
@@ -43,6 +43,26 @@ func (e *Engine) coverage(name string, links []*model.Link) model.TargetReport {
 		}
 	}
 
+	// Upstream ranges referenced by open todos: known, planned gaps.
+	planned := map[string][]ref.Range{}
+	todoCount := map[string]int{}
+	for _, t := range todos {
+		if t.Kind != marker.NoteTodo {
+			continue
+		}
+		counted := map[string]bool{}
+		for _, r := range t.Refs {
+			if r.Target != name || r.Status != model.OK {
+				continue
+			}
+			planned[r.Current] = append(planned[r.Current], r.Range)
+			if !counted[r.Current] {
+				counted[r.Current] = true
+				todoCount[r.Current]++
+			}
+		}
+	}
+
 	for _, f := range files {
 		if !filter.Match(f) {
 			continue
@@ -58,7 +78,7 @@ func (e *Engine) coverage(name string, links []*model.Link) model.TargetReport {
 		} else {
 			sig = lang.Fallback().(lang.LineClassifier).SignificantLines(content)
 		}
-		fc := model.FileCoverage{Path: f, Language: language.ID(), Lines: len(sig), Links: linkCount[f]}
+		fc := model.FileCoverage{Path: f, Language: language.ID(), Lines: len(sig), Links: linkCount[f], Todos: todoCount[f]}
 		state := make([]byte, len(sig)+1) // 0 none, 1 covered, 2 waived
 		if m := byFile[f]; m != nil {
 			for _, r := range m.waived {
@@ -118,6 +138,12 @@ func (e *Engine) coverage(name string, links []*model.Link) model.TargetReport {
 					}
 				}
 				sc := model.SymbolCoverage{Name: s.Name, Kind: s.Kind, Start: s.Start, End: s.End, Exported: s.Exported}
+				for _, pr := range planned[f] {
+					if pr.Start <= s.End && s.Start <= pr.End {
+						sc.Planned = true
+						break
+					}
+				}
 				switch {
 				case tot > 0 && cov == tot:
 					sc.State = "covered"

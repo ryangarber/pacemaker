@@ -48,6 +48,8 @@ func configCmd() *Command {
   drift.cosmetic            ok | warn | fail
   drift.fail_on             list of statuses that fail ` + "`check`" + `
   drift.context             diff context lines
+  todo.fail_on              todo conditions that fail ` + "`check`" + `: any, blocker, high,
+                            normal, low, stale, review (default: none)
   report.format             default report format
   local.exclude             local paths never scanned for markers
   targets.<name>.rev        branch/tag/commit to track

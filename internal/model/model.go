@@ -79,6 +79,112 @@ type Link struct {
 	Added        int             `json:"lines_added,omitempty"`
 	Removed      int             `json:"lines_removed,omitempty"`
 	Commits      []source.Commit `json:"commits,omitempty"`
+	// Todos attached to this link's block (also listed in Report.Todos).
+	Todos []*Todo `json:"-"`
+}
+
+// OpenTodos counts attached @pace:todo items (excluding notes).
+func (l *Link) OpenTodos() int {
+	n := 0
+	for _, t := range l.Todos {
+		if t.Kind == marker.NoteTodo {
+			n++
+		}
+	}
+	return n
+}
+
+// TodoRef is an upstream reference on a todo/note, resolved against the
+// current target (no baseline: it only answers "does this still exist?").
+type TodoRef struct {
+	Ref     string    `json:"ref"`
+	Target  string    `json:"target"`
+	Path    string    `json:"path"`
+	Current string    `json:"current_path,omitempty"`
+	Symbol  string    `json:"symbol,omitempty"`
+	Range   ref.Range `json:"range"`
+	Status  Status    `json:"status"` // ok | missing | error
+	Detail  string    `json:"detail,omitempty"`
+}
+
+// Todo is a @pace:todo (open work) or @pace:note (information) annotation.
+type Todo struct {
+	Kind     marker.NoteKind `json:"kind"`
+	File     string          `json:"file"`
+	Line     int             `json:"line"`
+	Text     string          `json:"text"`
+	Owner    string          `json:"owner,omitempty"`
+	Priority string          `json:"priority,omitempty"`
+	Tags     []string        `json:"tags,omitempty"`
+	Block    string          `json:"block,omitempty"`
+	// BlockStatus is the most urgent status among the block's links. A todo
+	// in a drifted block may be outdated by the upstream change.
+	BlockStatus Status    `json:"block_status,omitempty"`
+	Refs        []TodoRef `json:"refs,omitempty"`
+}
+
+// Stale reports whether any upstream reference no longer resolves.
+func (t *Todo) Stale() bool {
+	for _, r := range t.Refs {
+		if r.Status == Missing {
+			return true
+		}
+	}
+	return false
+}
+
+// NeedsReview reports whether upstream moved under the todo: its block
+// drifted/went missing, or a referenced upstream location disappeared.
+func (t *Todo) NeedsReview() bool {
+	switch t.BlockStatus {
+	case Drifted, Missing:
+		return true
+	}
+	return t.Stale()
+}
+
+// Priorities in display order (most urgent first). Unknown priorities rank
+// with "normal".
+var Priorities = []string{"blocker", "high", "normal", "low"}
+
+var prioAlias = map[string]string{
+	"critical": "blocker", "crit": "blocker", "p0": "blocker",
+	"p1": "high", "hi": "high", "urgent": "high",
+	"": "normal", "medium": "normal", "med": "normal", "p2": "normal",
+	"p3": "low", "lo": "low", "minor": "low",
+}
+
+// PriorityClass maps a free-form priority onto one of Priorities.
+func PriorityClass(p string) string {
+	if a, ok := prioAlias[p]; ok {
+		return a
+	}
+	for _, x := range Priorities {
+		if x == p {
+			return p
+		}
+	}
+	return "normal"
+}
+
+// PriorityRank orders priorities (higher is more urgent).
+func PriorityRank(p string) int {
+	c := PriorityClass(p)
+	for i, x := range Priorities {
+		if x == c {
+			return len(Priorities) - i
+		}
+	}
+	return 0
+}
+
+// TodoCounts summarises todo/note annotations.
+type TodoCounts struct {
+	Open        int            `json:"open"`
+	Notes       int            `json:"notes"`
+	Stale       int            `json:"stale"`        // todos/notes whose upstream ref is gone
+	NeedsReview int            `json:"needs_review"` // open todos whose upstream changed underneath
+	ByPriority  map[string]int `json:"by_priority,omitempty"`
 }
 
 // ID is a human-facing identifier, unique within a report.
@@ -108,6 +214,9 @@ type SymbolCoverage struct {
 	End      int    `json:"end"`
 	State    string `json:"state"` // covered | partial | waived | uncovered
 	Exported bool   `json:"exported"`
+	// Planned is true when a @pace:todo references this symbol (a known,
+	// tracked gap rather than an unnoticed one).
+	Planned bool `json:"planned,omitempty"`
 }
 
 // FileCoverage is coverage for one upstream file.
@@ -121,6 +230,7 @@ type FileCoverage struct {
 	Links       int              `json:"links"`
 	Uncovered   []ref.Range      `json:"uncovered,omitempty"`
 	Symbols     []SymbolCoverage `json:"symbols,omitempty"`
+	Todos       int              `json:"todos,omitempty"` // open todos referencing this file
 }
 
 // Percent of significant lines covered or waived.
@@ -182,7 +292,48 @@ type Report struct {
 	Links     []*Link          `json:"links"`
 	Problems  []marker.Problem `json:"problems,omitempty"`
 	Counts    map[Status]int   `json:"counts"`
+	Todos     []*Todo          `json:"todos,omitempty"`
+	TodoStats TodoCounts       `json:"todo_counts"`
 	Failing   bool             `json:"failing"`
+	// FailReasons explains why Failing is set (empty when passing).
+	FailReasons []string `json:"fail_reasons,omitempty"`
+}
+
+// SortTodos orders todos before notes, then by priority, then location.
+func (r *Report) SortTodos() {
+	sort.SliceStable(r.Todos, func(i, j int) bool {
+		a, b := r.Todos[i], r.Todos[j]
+		if a.Kind != b.Kind {
+			return a.Kind == marker.NoteTodo
+		}
+		if pa, pb := PriorityRank(a.Priority), PriorityRank(b.Priority); pa != pb {
+			return pa > pb
+		}
+		if a.File != b.File {
+			return a.File < b.File
+		}
+		return a.Line < b.Line
+	})
+}
+
+// CountTodos recomputes TodoStats.
+func (r *Report) CountTodos() {
+	c := TodoCounts{ByPriority: map[string]int{}}
+	for _, t := range r.Todos {
+		if t.Stale() {
+			c.Stale++
+		}
+		if t.Kind != marker.NoteTodo {
+			c.Notes++
+			continue
+		}
+		c.Open++
+		c.ByPriority[PriorityClass(t.Priority)]++
+		if t.NeedsReview() {
+			c.NeedsReview++
+		}
+	}
+	r.TodoStats = c
 }
 
 // Sort orders links by urgency, then block and ref.

@@ -62,6 +62,27 @@ type Dialect struct {
 	Skip map[string]bool
 	// Exported decides visibility of a symbol.
 	Exported func(header []Token, name string, inContainer bool) bool
+
+	// MemberAssign enables JavaScript-style symbols that are declared by
+	// assignment or registration rather than by a keyword (AngularJS 1.x,
+	// ES5, CommonJS):
+	//   - `$scope.x = ...`, `this.x = ...` and `vm.x = ...` (where
+	//     `var vm = this`) inside function bodies;
+	//   - `Foo.prototype.x = function`, `Foo.x = function`, `exports.x = ...`
+	//     at top level;
+	//   - declarations inside top-level IIFEs (`(function () { ... })()`);
+	//   - registrations such as `.controller('Name', fn)` (see Registrations).
+	MemberAssign bool
+	// ScopeRoots are receivers whose assigned members are symbols inside
+	// function bodies, besides "this" and its aliases (e.g. "$scope").
+	ScopeRoots map[string]bool
+	// Registrations maps call names to the symbol kind of the unit they
+	// register: `.controller('LoginCtrl', fn)` → LoginCtrl (controller).
+	Registrations map[string]string
+	// WeakRegistrations are registration names that are also common method
+	// names (filter, value, ...); they only count when the call chain also
+	// contains a `module(...)` call or the second argument is a function.
+	WeakRegistrations map[string]bool
 }
 
 var puncts = []string{

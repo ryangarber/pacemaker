@@ -253,3 +253,61 @@ func TestNonGitSnapshotRelocation(t *testing.T) {
 		t.Errorf("want moved to L3-L4, got %s %s", l.Status, l.Range)
 	}
 }
+
+func TestTodos(t *testing.T) {
+	proj, up := setup(t)
+	write(t, filepath.Join(proj, "src/todo.ts"), `// @pace:begin todo.dec lib/store.dart#Store.dec
+// @pace:todo support a step argument prio=high owner=ana
+// @pace:end
+// @pace:todo port the counter field ref=lib/store.dart#Store.count tags=gap
+// @pace:todo drop once upstream removes it ref=lib/store.dart#gone
+// @pace:note kept synchronous on purpose block=todo.dec
+`)
+	e, r := analyze(t, proj)
+	if len(r.Problems) > 0 {
+		t.Fatalf("problems: %v", r.Problems)
+	}
+	if len(r.Todos) != 4 || r.TodoStats.Open != 3 || r.TodoStats.Notes != 1 || r.TodoStats.Stale != 1 {
+		t.Fatalf("todos=%d stats=%+v", len(r.Todos), r.TodoStats)
+	}
+	if r.Todos[0].Priority != "high" || r.Todos[0].Block != "todo.dec" {
+		t.Errorf("high-priority todo should sort first: %+v", r.Todos[0])
+	}
+	for _, l := range r.Links {
+		if l.Block == "todo.dec" && (l.OpenTodos() != 1 || len(l.Todos) != 2) {
+			t.Errorf("block todos: %d open, %d total", l.OpenTodos(), len(l.Todos))
+		}
+	}
+	planned := false
+	for _, f := range r.Targets[0].Files {
+		for _, s := range f.Symbols {
+			if s.Name == "Store.count" {
+				planned = s.Planned
+			}
+		}
+	}
+	if !planned {
+		t.Error("Store.count is referenced by a todo and should be planned")
+	}
+
+	// todo.fail_on policy.
+	e.Cfg.Todo.FailOn = []string{"stale"}
+	if _, err := e.Accept(func(*model.Link) bool { return true }, false); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := e.Analyze(engine.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r2.Failing || len(r2.FailReasons) != 1 || !strings.Contains(r2.FailReasons[0], "stale") {
+		t.Errorf("stale todo should fail the check: %v", r2.FailReasons)
+	}
+
+	// Upstream drift under a block flags its todos for review.
+	write(t, filepath.Join(up, "lib/store.dart"), upstreamV2)
+	git(t, up, "commit", "-qam", "v2")
+	_, r = analyze(t, proj)
+	if r.TodoStats.NeedsReview != 2 || r.Todos[0].BlockStatus != model.Drifted || !r.Todos[0].NeedsReview() {
+		t.Errorf("todo in drifted block should need review: %+v %+v", r.TodoStats, r.Todos[0])
+	}
+}

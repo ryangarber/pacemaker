@@ -3,6 +3,13 @@
 // that ignores semicolons, trailing commas and quote style (prettier-proof),
 // symbol resolution (classes, interfaces, enums, namespaces, functions, arrow
 // consts, methods) and semantic diffs (export / signature changes, renames).
+//
+// Assignment-declared symbols are recognised too, so AngularJS 1.x / ES5 code
+// resolves: `$scope.x = ...` and `this.x = ...` (or `vm.x` with `var vm =
+// this`) inside controllers/services/constructors, `.controller('Name', fn)`
+// style registrations (also with ['$dep', fn] annotations and inside IIFEs),
+// factory `return { ... }` objects, `Foo.prototype.x = function` and
+// `exports.x = ...`.
 package javascript
 
 import (
@@ -36,6 +43,14 @@ var Dialect = &clike.Dialect{
 	Imports: set("import", "export"),
 	Skip: set("if", "for", "while", "switch", "return", "do", "else", "try", "throw", "new",
 		"await", "yield", "delete", "typeof", "super", "this"),
+	MemberAssign: true,
+	ScopeRoots:   set("$scope", "$rootScope"),
+	Registrations: map[string]string{
+		"controller": "controller", "service": "service", "factory": "factory", "provider": "provider",
+		"directive": "directive", "component": "component", "filter": "filter", "decorator": "decorator",
+		"animation": "animation", "constant": "constant", "value": "value",
+	},
+	WeakRegistrations: set("filter", "constant", "value", "decorator", "animation", "provider", "service"),
 	Exported: func(header []clike.Token, name string, inContainer bool) bool {
 		if len(name) > 0 && name[0] == '#' {
 			return false
