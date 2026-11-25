@@ -1,3 +1,17 @@
+## 0.1.2
+
+### Bug Fixes
+
+- **javascript:** more reliable symbol detection ([0b40548](https://github.com/ryangarber/pacemaker/commit/0b405482f48c61f9a9b6dcdb6581eeb34b81980c))
+- use wrong-first order in text report ([0b40548](https://github.com/ryangarber/pacemaker/commit/0b405482f48c61f9a9b6dcdb6581eeb34b81980c))
+- parse semicolons correctly ([0b40548](https://github.com/ryangarber/pacemaker/commit/0b405482f48c61f9a9b6dcdb6581eeb34b81980c))
+- show correct version from go cli ([0b40548](https://github.com/ryangarber/pacemaker/commit/0b405482f48c61f9a9b6dcdb6581eeb34b81980c))
+- various minor fixes ([0b40548](https://github.com/ryangarber/pacemaker/commit/0b405482f48c61f9a9b6dcdb6581eeb34b81980c))
+
+### Other
+
+- add missing regression tests ([0b40548](https://github.com/ryangarber/pacemaker/commit/0b405482f48c61f9a9b6dcdb6581eeb34b81980c))
+
 ## 0.1.1
 
 ### Features
